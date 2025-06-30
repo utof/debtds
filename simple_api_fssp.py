@@ -2,6 +2,8 @@ import pandas as pd
 import requests
 import time
 import json
+import os
+from datetime import datetime
 
 # Global variables
 INPUT_CSV_PATH = "dummy_data.csv"    # Path to your input CSV
@@ -50,19 +52,22 @@ def process_row(row, index):
 
     # Store metadata for analysis
     metadata = {
-        "row_index": index,
         "timeout_used": CURRENT_TIMEOUT,
         "time_taken": time_taken,
-        "success": success
+        "success": success,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
     # Return row with response and metadata
     return {"fssp_response": json.dumps(response), **row}, metadata
 
 # Save responses to CSV
-def save_to_csv(data, filepath):
+def save_to_csv(data, filepath, append=False):
     df = pd.DataFrame(data)
-    df.to_csv(filepath, index=False)
+    if append and os.path.exists(filepath):
+        df.to_csv(filepath, mode='a', header=False, index=False)
+    else:
+        df.to_csv(filepath, index=False)
 
 # Main function to process CSV and save results
 def main():
@@ -77,9 +82,20 @@ def main():
         results.append(result)
         metadata_list.append(metadata)
 
-    # Save results and metadata to CSV
-    save_to_csv(results, OUTPUT_CSV_PATH)
-    save_to_csv(metadata_list, METADATA_CSV_PATH)
+    # Handle output.csv filename logic
+    date_str = datetime.now().strftime("%d%m%y")
+    base, ext = os.path.splitext(OUTPUT_CSV_PATH)
+    output_path = f"{base}{date_str}{ext}"
+    counter = 1
+    while os.path.exists(output_path):
+        output_path = f"{base}{date_str}_{counter}{ext}"
+        counter += 1
+
+    # Save results to output file (never append, always new)
+    save_to_csv(results, output_path)
+
+    # Save or append metadata
+    save_to_csv(metadata_list, METADATA_CSV_PATH, append=True)
 
 # Run the script
 if __name__ == "__main__":
