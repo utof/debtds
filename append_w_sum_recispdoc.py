@@ -35,6 +35,6 @@ def add_sum_recispdoc_to_csv(input_csv_path, info_or_path, output_csv_path):
 
 # Usage example:
 info = extract_sum_recispdoc_from_csv('output300625_1.csv')
-# with open('info.json', 'w', encoding='utf-8') as f:
+# with open('info_2.json', 'w', encoding='utf-8') as f:
 #     json.dump(info, f, ensure_ascii=False, indent=4)
 add_sum_recispdoc_to_csv('example.csv', info, 'fssp_2.csv') # or 'info.json'
