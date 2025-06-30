@@ -43,15 +43,16 @@ def process_row(row, index):
     }
 
     # Return row with response and metadata
-    return {"fssp_resp": json.dumps(response)}, metadata
+    # Use ensure_ascii=False to preserve Cyrillics in JSON
+    return {"fssp_resp": json.dumps(response, ensure_ascii=False)}, metadata
 
 # Save responses to CSV
 def save_to_csv(data, filepath, append=False):
     df = pd.DataFrame(data)
     if append and os.path.exists(filepath):
-        df.to_csv(filepath, mode='a', header=False, index=False)
+        df.to_csv(filepath, mode='a', header=False, index=False, encoding='utf-8-sig')
     else:
-        df.to_csv(filepath, index=False)
+        df.to_csv(filepath, index=False, encoding='utf-8-sig')
     print(f'saved {data} to {filepath}')
 
 # Main function to process CSV and save results
