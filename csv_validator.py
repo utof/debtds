@@ -65,4 +65,8 @@ def validate_csv(file_path: str, show_row_content: bool = False) -> None:
         print("Validation complete. No further issues found in rows.")
 
 if __name__ == "__main__":
-    validate_csv('dummy_data.csv', show_row_content=True)
+    validate_csv('example.csv', show_row_content=True)
+    # df = load_csv('example.csv')
+    # print("All IPs in the CSV:")
+    # for ip in df['ip']:
+    #     print(ip)
