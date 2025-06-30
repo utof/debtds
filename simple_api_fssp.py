@@ -11,8 +11,8 @@ from fssp_call import api_call
 INPUT_CSV_PATH = "example.csv"    # Path to your input CSV
 OUTPUT_CSV_PATH = "output.csv"  # Path where responses are saved
 METADATA_CSV_PATH = "metadata.csv"  # Path for timeout metadata
-FAKE_API = True                 # Set to False for real FSSP API calls
-CURRENT_TIMEOUT = 61           # Starting timeout in seconds
+FAKE_API = False                 # Set to False for real FSSP API calls
+CURRENT_TIMEOUT = 400           # Starting timeout in seconds
 
 # Process a single row with dynamic timeout and metadata
 def process_row(row, index):
@@ -24,16 +24,6 @@ def process_row(row, index):
     time_taken = end_time - start_time
 
     success = response.get("status") == 200
-    # if success:
-    #     # Reduce timeout: try 200s, then lower, but not below 60s
-    #     if CURRENT_TIMEOUT > 200:
-    #         CURRENT_TIMEOUT = 200
-    #     else:
-    #         CURRENT_TIMEOUT = max(60, CURRENT_TIMEOUT * 0.8)  # Gradually reduce
-    # else:
-    #     # Increase timeout on failure (timeout or 500), up to 400s
-    #     CURRENT_TIMEOUT = min(400, CURRENT_TIMEOUT * 1.5)
-
     # Store metadata for analysis
     metadata = {
         "timeout_used": CURRENT_TIMEOUT,
@@ -76,8 +66,8 @@ def main():
         result, metadata = process_row(row.to_dict(), index)
         results.append(result)
         metadata_list.append(metadata)
-        save_to_csv(results, output_path, append=True)
-        save_to_csv(metadata_list, METADATA_CSV_PATH, append=True)  
+        save_to_csv([result], output_path, append=True)
+        save_to_csv([metadata], METADATA_CSV_PATH, append=True)  
 
 # Run the script
 if __name__ == "__main__":
