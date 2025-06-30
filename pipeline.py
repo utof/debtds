@@ -12,10 +12,8 @@ def pipeline():
     """Execute the full data processing pipeline"""
     # Step 1: Make API calls and save raw responses
     # In simple_api_fssp.py, comment out lines 73-74 and set:
-    # INPUT_CSV_PATH = "example.csv"
-    # OUTPUT_CSV_PATH = f'{dir_name}/output.csv' # change this right now r: OK
-    run_api()  # Requires modified simple_api_fssp.py to use pipeline paths
-    
+    run_api(input_csv_path='example.csv', output_csv_path=f'{dir_name}/output.csv')  # Requires modified simple_api_fssp.py to use pipeline paths
+
     # Step 2: Extract sum and recispdoc from responses
     # In append_w_sum_recispdoc.py, comment out lines 37-40
     info = extract_sum_recispdoc_from_csv(f'{dir_name}/output.csv') 

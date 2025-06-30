@@ -8,9 +8,6 @@ from fssp020_call import api_call
 
 
 # Global variables
-INPUT_CSV_PATH = "example.csv"    # Path to your input CSV
-OUTPUT_CSV_PATH = "output.csv"  # Path where responses are saved
-METADATA_CSV_PATH = "metadata.csv"  # Path for timeout metadata
 FAKE_API = False                 # Set to False for real FSSP API calls
 CURRENT_TIMEOUT = 400           # Starting timeout in seconds
 
@@ -19,7 +16,7 @@ def process_row(row, index):
     global CURRENT_TIMEOUT
     ip = row["ip"]  # Assumes 'ip' column exists in CSV
     start_time = time.time()
-    response = api_call(ip, CURRENT_TIMEOUT, FAKE_API)
+    response = api_call(ip, FAKE_API)
     end_time = time.time()
     # Return row with response only
     return {"fssp_resp": json.dumps(response, ensure_ascii=False)}
@@ -34,14 +31,14 @@ def save_to_csv(data, filepath, append=False):
     print(f'saved {data} to {filepath}')
 
 # Main function to process CSV and save results
-def main():
-    # Read input CSV
-    df = pd.read_csv(INPUT_CSV_PATH)
+# Now accepts input and output paths as arguments for pipeline compatibility
+def main(input_csv_path, output_csv_path):
+    df = pd.read_csv(input_csv_path)
     results = []         # Store API responses
 
     # Handle output.csv filename logic
     date_str = datetime.now().strftime("%d%m%y")
-    base, ext = os.path.splitext(OUTPUT_CSV_PATH)
+    base, ext = os.path.splitext(output_csv_path)
     output_path = f"{base}{date_str}{ext}"
     counter = 1
     while os.path.exists(output_path):
@@ -56,4 +53,6 @@ def main():
 
 # Run the script
 if __name__ == "__main__":
-    main()
+    INPUT_CSV_PATH = 'example.csv'  # Default input CSV path
+    OUTPUT_CSV_PATH = 'output.csv'   # Default output CSV path
+    main(input_csv_path=INPUT_CSV_PATH, output_csv_path=OUTPUT_CSV_PATH)
