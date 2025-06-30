@@ -1,7 +1,7 @@
 import pandas as pd
 import json
 
-def add_status_columns(input_csv_path, debtor_json_path, creditor_json_path, output_csv_path=None):
+def add_status_columns(input_csv_path, debtor_json_path, creditor_json_path, output_csv_path=False):
     """Add status_debtor and status_creditor columns to the CSV based on JSON status codes."""
     # Load CSV and JSON files
     df = pd.read_csv(input_csv_path)
@@ -25,7 +25,7 @@ def add_status_columns(input_csv_path, debtor_json_path, creditor_json_path, out
 
     return df
 
-def filter_status_rows(df, output_csv_path=None):
+def filter_status_rows(df, output_csv_path=False):
     """Filter rows to keep only status_debtor in [0, 1, 4] and status_creditor in [0, 4]."""
     # Filter rows based on status conditions
     filtered_df = df[
@@ -54,8 +54,8 @@ def drop_status_columns(df, output_csv_path=True):
 
 if __name__ == "__main__":
     INPUT_CSV_PATH = '3fssp.csv'
-    DEBTOR_JSON_PATH = 'debtor_responses.json'
-    CREDITOR_JSON_PATH = 'creditor_responses.json'
+    DEBTOR_JSON_PATH = 'debtor_codes.json'
+    CREDITOR_JSON_PATH = 'creditor_codes.json'
     OUTPUT_CSV_1 = 'with_statuses.csv'
     OUTPUT_CSV_2 = 'filtered_statuses.csv'
     OUTPUT_CSV_3 = 'final_output.csv'

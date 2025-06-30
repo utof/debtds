@@ -20,16 +20,18 @@ def process_inn_json(input_path, output_path):
             # Check 'rez' array for description or status
             if 'rez' in entry and len(entry['rez']) > 0:
                 record = entry['rez'][0]
-                if 'description' in record:
+                if 'description' in record and record['description'].get('value') is not None:
                     description = record['description'].get('value', '')
-                    if 'Конкурсное производство' in description:
+                    if isinstance(description, str) and 'Конкурсное производство' in description:
                         code = 3
-                    elif description == "Наблюдение":
+                    elif isinstance(description, str) and description == "Наблюдение":
                         code = 2
-                    elif description == "Производство по делу прекращено":
+                    elif isinstance(description, str) and description == "Производство по делу прекращено":
                         code = 4
-                if 'status' in record and record['status'].get('value', '') == "Производство по делу прекращено":
-                    code = 4
+                if 'status' in record and record['status'].get('value') is not None:
+                    status_value = record['status'].get('value', '')
+                    if isinstance(status_value, str) and status_value == "Производство по делу прекращено":
+                        code = 4
 
         # Add the assigned code to output
         output_data[inn] = code
@@ -37,7 +39,6 @@ def process_inn_json(input_path, output_path):
     # Save the output JSON file
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(output_data, f, ensure_ascii=False, indent=4)
-
 if __name__ == "__main__":
     # Process debtor JSON
     INPUT_PATH_DEBTOR = 'debtor_responses.json'
