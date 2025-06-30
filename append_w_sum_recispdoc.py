@@ -19,10 +19,13 @@ def extract_sum_recispdoc_from_csv(csv_path):
         result[process_title] = {"recispdoc": name, "sum": sum_value}
     return result
 
-def add_sum_recispdoc_to_csv(input_csv_path, json_path, output_csv_path):
-    """Add recispdoc and sum columns to a CSV based on ip from a JSON file."""
-    with open(json_path, 'r', encoding='utf-8') as f:
-        info = json.load(f)
+def add_sum_recispdoc_to_csv(input_csv_path, info_or_path, output_csv_path):
+    """Add recispdoc and sum columns to a CSV based on ip from a JSON file or dict."""
+    if isinstance(info_or_path, dict):
+        info = info_or_path
+    else:
+        with open(info_or_path, 'r', encoding='utf-8') as f:
+            info = json.load(f)
     df = pd.read_csv(input_csv_path)
     if 'ip' not in df.columns:
         raise ValueError("Input CSV must have 'ip' column")
@@ -32,6 +35,6 @@ def add_sum_recispdoc_to_csv(input_csv_path, json_path, output_csv_path):
 
 # Usage example:
 info = extract_sum_recispdoc_from_csv('output300625_1.csv')
-with open('info.json', 'w', encoding='utf-8') as f:
-    json.dump(info, f, ensure_ascii=False, indent=4)
-add_sum_recispdoc_to_csv('example.csv', 'info.json', 'fssp_2.csv')
+# with open('info.json', 'w', encoding='utf-8') as f:
+#     json.dump(info, f, ensure_ascii=False, indent=4)
+add_sum_recispdoc_to_csv('example.csv', info, 'fssp_2.csv') # or 'info.json'
