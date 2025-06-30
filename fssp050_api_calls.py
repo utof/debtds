@@ -4,7 +4,7 @@ import time
 import json
 import os
 from datetime import datetime
-from fssp_call import api_call
+from fssp020_call import api_call
 
 
 # Global variables
