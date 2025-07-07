@@ -35,57 +35,6 @@ def extract_links(df: pd.DataFrame, column: str = 'links') -> List[Tuple[int, Op
     """Extract URLs from the specified column, preserving row index and date."""
     return [(i, date, link) for i, links in df[column].items() for date, link in parse_links(links)]
 
-def fetch_pdf_content(url: str) -> Optional[str]:
-    """Fetch PDF text using Selenium to bypass CAPTCHA on kad.arbitr.ru."""
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from webdriver_manager.chrome import ChromeDriverManager
-        import tempfile
-
-        # Configure headless Chrome
-        chrome_options = Options()
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--lang=ru-RU")
-        chrome_options.add_argument("user-agent=Mozilla/5.0")
-
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), options=chrome_options
-        )
-        driver.get(url)
-
-        # Wait for CAPTCHA to auto-complete (if it does)
-        import time
-        time.sleep(15)
-
-        # Get cookies and close browser
-        cookies = driver.get_cookies()
-        driver.quit()
-
-        # Use cookies to fetch the PDF
-        import requests
-        session = requests.Session()
-        for cookie in cookies:
-            session.cookies.set(cookie['name'], cookie['value'])
-        response = session.get(url, timeout=20)
-        response.raise_for_status()
-        if response.headers.get("Content-Type", "").lower() != "application/pdf":
-            return None
-
-        # Parse PDF text
-        from PyPDF2 import PdfReader
-        from io import BytesIO
-        reader = PdfReader(BytesIO(response.content))
-        return "\n".join([page.extract_text() or "" for page in reader.pages])
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch {url}: {e}")
-        return None
 
 def extract_decision_text(pdf_text: Optional[str]) -> Optional[str]:
     """Extract text between 'РЕШИЛ:' and 'судья' (case-insensitive)."""
@@ -125,7 +74,8 @@ def append_to_csv(output_path: str, row_index: int, date: Optional[str], link: s
 
 def process_pdf_links(links: List[Tuple[int, Optional[str], str]], output_path: str) -> None:
     """Process PDF links, group results by row, and write incrementally to CSV."""
-    session = PDFSession(wait_sec=15)
+    # session = PDFSession(wait_sec=15, sleep_range=(1,2), headless=False)
+    session = PDFSession(wait_sec=15, headless=False)
 
     # Group links by row index
     grouped_links = defaultdict(list)
