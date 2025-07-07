@@ -10,6 +10,13 @@ def read_csv(file_path: str) -> pd.DataFrame:
     """Read a CSV file into a Pandas DataFrame."""
     return pd.read_csv(file_path)
 
+
+def get_first_n_with_links(csv_path: str, n: int) -> pd.DataFrame:
+    """Return the first `n` rows from the CSV that have at least one 'https://' link in the 'links' column."""
+    df = pd.read_csv(csv_path)
+    has_link = df['links'].astype(str).str.contains("https://", na=False)
+    return df[has_link].head(n)
+
 def parse_links(cell: str) -> List[Tuple[Optional[str], str]]:
     """Parse a cell containing links in 'dd.mm.yyyy: link' or 'link' format."""
     if not isinstance(cell, str) or not cell.strip():
@@ -28,15 +35,57 @@ def extract_links(df: pd.DataFrame, column: str = 'links') -> List[Tuple[int, Op
     return [(i, date, link) for i, links in df[column].items() for date, link in parse_links(links)]
 
 def fetch_pdf_content(url: str) -> Optional[str]:
-    """Fetch a PDF from a URL and extract its text content."""
+    """Fetch PDF text using Selenium to bypass CAPTCHA on kad.arbitr.ru."""
     try:
-        response = requests.get(url)
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        import tempfile
+
+        # Configure headless Chrome
+        chrome_options = Options()
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--lang=ru-RU")
+        chrome_options.add_argument("user-agent=Mozilla/5.0")
+
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()), options=chrome_options
+        )
+        driver.get(url)
+
+        # Wait for CAPTCHA to auto-complete (if it does)
+        import time
+        time.sleep(15)
+
+        # Get cookies and close browser
+        cookies = driver.get_cookies()
+        driver.quit()
+
+        # Use cookies to fetch the PDF
+        import requests
+        session = requests.Session()
+        for cookie in cookies:
+            session.cookies.set(cookie['name'], cookie['value'])
+        response = session.get(url, timeout=20)
         response.raise_for_status()
-        pdf_file = BytesIO(response.content)
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
-        return reduce(lambda acc, page: acc + (page.extract_text() or ""), pdf_reader.pages, "")
-    except (requests.RequestException, PyPDF2.errors.PdfReadError):
+        if response.headers.get("Content-Type", "").lower() != "application/pdf":
+            return None
+
+        # Parse PDF text
+        from PyPDF2 import PdfReader
+        from io import BytesIO
+        reader = PdfReader(BytesIO(response.content))
+        return "\n".join([page.extract_text() or "" for page in reader.pages])
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch {url}: {e}")
         return None
+
 
 def extract_decision_text(pdf_text: Optional[str]) -> Optional[str]:
     """Extract text between 'РЕШИЛ:' and 'судья' (case-insensitive)."""
@@ -85,7 +134,8 @@ def process_pdf_links(links: List[Tuple[int, Optional[str], str]], output_path: 
 
 def main(input_path: str, output_path: str) -> None:
     """Main function to read CSV, extract links, process PDFs, and save incrementally."""
-    df = read_csv(input_path)
+    df = get_first_n_with_links(input_path, 30)  # Adjust n as needed
+    # df = read_csv(input_path)
     initialize_output_csv(df, output_path)
     links = extract_links(df)
     if not links:
@@ -94,6 +144,6 @@ def main(input_path: str, output_path: str) -> None:
 
 if __name__ == "__main__":
     # Example usage
-    input_path = "link_decider\\input.csv"  # Replace with your input CSV path
+    input_path = "link_decider\\data_.csv"  # Replace with your input CSV path
     output_path = "link_decider\\output.csv"  # Replace with your output CSV path
     main(input_path, output_path)
