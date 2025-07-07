@@ -6,17 +6,17 @@ import PyPDF2
 from typing import List, Tuple, Optional
 from functools import reduce
 from pdf_session import PDFSession  # or paste the class in same file
+from collections import defaultdict
 
 def read_csv(file_path: str) -> pd.DataFrame:
     """Read a CSV file into a Pandas DataFrame."""
     return pd.read_csv(file_path)
 
-
 def get_first_n_with_links(csv_path: str, n: int) -> pd.DataFrame:
     """Return the first `n` rows from the CSV that have at least one 'https://' link in the 'links' column."""
     df = pd.read_csv(csv_path)
     has_link = df['links'].astype(str).str.contains("https://", na=False)
-    return df[has_link].head(n)
+    return df[has_link].head(n).reset_index(drop=True)  # Reset index to ensure sequential indices
 
 def parse_links(cell: str) -> List[Tuple[Optional[str], str]]:
     """Parse a cell containing links in 'dd.mm.yyyy: link' or 'link' format."""
@@ -87,7 +87,6 @@ def fetch_pdf_content(url: str) -> Optional[str]:
         print(f"[ERROR] Failed to fetch {url}: {e}")
         return None
 
-
 def extract_decision_text(pdf_text: Optional[str]) -> Optional[str]:
     """Extract text between 'РЕШИЛ:' and 'судья' (case-insensitive)."""
     if not pdf_text:
@@ -116,31 +115,43 @@ def format_output(date: Optional[str], text: Optional[str]) -> str:
         return f"???.??.????: {text}"
 
 def append_to_csv(output_path: str, row_index: int, date: Optional[str], link: str, text: Optional[str]) -> None:
-    """Append or update a row in the output CSV with the extracted text."""
     output_df = pd.read_csv(output_path)
-    formatted_text = format_output(date if date else "???.??.????", text)
+    formatted_text = text if text else "Failed to extract content"
     if pd.isna(output_df.at[row_index, 'links_texts']):
         output_df.at[row_index, 'links_texts'] = formatted_text
     else:
-        current = output_df.at[row_index, 'links_texts']
-        output_df.at[row_index, 'links_texts'] = f"{current}\n{formatted_text}"
+        output_df.at[row_index, 'links_texts'] += f"\n{formatted_text}"
     output_df.to_csv(output_path, index=False)
 
 def process_pdf_links(links: List[Tuple[int, Optional[str], str]], output_path: str) -> None:
+    """Process PDF links, group results by row, and write incrementally to CSV."""
     session = PDFSession(wait_sec=15)
+
+    # Group links by row index
+    grouped_links = defaultdict(list)
+    for row_index, date, link in links:
+        grouped_links[row_index].append((date, link))
+
     try:
-        for row_index, date, link in links:
-            print(f"[INFO] Processing: {link}")
-            pdf_text = session.fetch_pdf_content(link)
-            decision_text = extract_decision_text(pdf_text)
-            append_to_csv(output_path, row_index, date, link, decision_text)
+        for row_index, date_links in grouped_links.items():
+            print(f"[INFO] Row {row_index} → {len(date_links)} link(s)")
+            extracted_texts = []
+
+            for date, link in date_links:
+                print(f"    [LINK] {link}")
+                pdf_text = session.fetch_pdf_content(link)
+                decision_text = extract_decision_text(pdf_text)
+                formatted = format_output(date or "???.??.????", decision_text)
+                extracted_texts.append(formatted)
+
+            full_text = "\n".join(extracted_texts)
+            append_to_csv(output_path, row_index, None, "", full_text)
     finally:
         session.close()
 
 def main(input_path: str, output_path: str) -> None:
     """Main function to read CSV, extract links, process PDFs, and save incrementally."""
     df = get_first_n_with_links(input_path, 30)  # Adjust n as needed
-    # df = read_csv(input_path)
     initialize_output_csv(df, output_path)
     links = extract_links(df)
     if not links:
