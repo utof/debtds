@@ -5,6 +5,7 @@ from io import BytesIO
 import PyPDF2
 from typing import List, Tuple, Optional
 from functools import reduce
+from pdf_session import PDFSession  # or paste the class in same file
 
 def read_csv(file_path: str) -> pd.DataFrame:
     """Read a CSV file into a Pandas DataFrame."""
@@ -126,11 +127,15 @@ def append_to_csv(output_path: str, row_index: int, date: Optional[str], link: s
     output_df.to_csv(output_path, index=False)
 
 def process_pdf_links(links: List[Tuple[int, Optional[str], str]], output_path: str) -> None:
-    """Process a list of PDF links and save results incrementally to CSV."""
-    for row_index, date, link in links:
-        pdf_text = fetch_pdf_content(link)
-        decision_text = extract_decision_text(pdf_text)
-        append_to_csv(output_path, row_index, date, link, decision_text)
+    session = PDFSession(wait_sec=15)
+    try:
+        for row_index, date, link in links:
+            print(f"[INFO] Processing: {link}")
+            pdf_text = session.fetch_pdf_content(link)
+            decision_text = extract_decision_text(pdf_text)
+            append_to_csv(output_path, row_index, date, link, decision_text)
+    finally:
+        session.close()
 
 def main(input_path: str, output_path: str) -> None:
     """Main function to read CSV, extract links, process PDFs, and save incrementally."""
@@ -144,6 +149,6 @@ def main(input_path: str, output_path: str) -> None:
 
 if __name__ == "__main__":
     # Example usage
-    input_path = "link_decider\\data_.csv"  # Replace with your input CSV path
-    output_path = "link_decider\\output.csv"  # Replace with your output CSV path
+    input_path = "link_decider\\deleted_columns.csv"  # Replace with your input CSV path
+    output_path = "link_decider\\deleted_columns_output.csv"  # Replace with your output CSV path
     main(input_path, output_path)
