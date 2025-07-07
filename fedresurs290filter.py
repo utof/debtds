@@ -58,7 +58,7 @@ if __name__ == "__main__":
     CREDITOR_JSON_PATH = 'creditor_codes.json'
     OUTPUT_CSV_1 = 'with_statuses.csv'
     OUTPUT_CSV_2 = 'filtered_statuses.csv'
-    OUTPUT_CSV_3 = 'final_output.csv'
+    OUTPUT_CSV_3 = 'fedresurs_statuses_filtered.csv'
 
     # Step 1: Add status columns
     df_with_statuses = add_status_columns(INPUT_CSV_PATH, DEBTOR_JSON_PATH, CREDITOR_JSON_PATH, OUTPUT_CSV_1)

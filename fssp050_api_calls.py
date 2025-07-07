@@ -53,4 +53,4 @@ def main(input_csv_path, output_csv_path, fake_api=False):
 if __name__ == "__main__":
     INPUT_CSV_PATH = 'example.csv'  # Default input CSV path
     OUTPUT_CSV_PATH = 'output.csv'   # Default output CSV path
-    main(input_csv_path=INPUT_CSV_PATH, output_csv_path=OUTPUT_CSV_PATH, fake_api=True)
+    main(input_csv_path=INPUT_CSV_PATH, output_csv_path=OUTPUT_CSV_PATH, fake_api=False)
