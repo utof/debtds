@@ -36,11 +36,26 @@ def extract_links(df: pd.DataFrame, column: str = 'links') -> List[Tuple[int, Op
     return [(i, date, link) for i, links in df[column].items() for date, link in parse_links(links)]
 
 
+import regex as re  # not re — use `pip install regex`
+
 def extract_decision_text(pdf_text: Optional[str]) -> Optional[str]:
-    """Extract text between 'РЕШИЛ:' and 'судья' (case-insensitive)."""
+    """
+    Extract the part after 'РЕШИЛ' (with arbitrary spaces between letters),
+    and ending before 'судья' (with arbitrary spacing). Case-insensitive.
+    """
     if not pdf_text:
         return None
-    pattern = r"(?i)РЕШИЛ:(.*?)(?:судья|$)"
+
+    # R\s*E\s*Ш\s*И\s*Л → handles Р Е Ш И Л and РЕШИЛ and messy variants
+    # same for C У Д Ь Я at the end
+    pattern = (
+        r"(?i)"                          # case-insensitive
+        r"(?:Р\s*Е\s*Ш\s*И\s*Л)"         # fuzzy "РЕШИЛ"
+        r"[\s:\.\-–—]*"                  # separator chars like ":" or space
+        r"(.*?)"                         # lazily capture content
+        r"(?:\n?.{0,15}С\s*У\s*Д\s*Ь\s*Я)"  # fuzzy "судья" anchor
+    )
+
     match = re.search(pattern, pdf_text, re.DOTALL)
     return match.group(1).strip() if match else None
 
