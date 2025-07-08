@@ -19,16 +19,21 @@ def get_first_n_with_links(csv_path: str, n: int) -> pd.DataFrame:
     return df[has_link].head(n).reset_index(drop=True)  # Reset index to ensure sequential indices
 
 def parse_links(cell: str) -> List[Tuple[Optional[str], str]]:
-    """Parse a cell containing links in 'dd.mm.yyyy: link' or 'link' format."""
+    """Parse a cell containing links in 'dd.mm.yyyy: link' format with \r or \n line endings."""
     if not isinstance(cell, str) or not cell.strip():
         return []
+    
     links = []
-    for line in cell.strip().split("\n"):
+    # Split on any combination of \r and \n
+    for line in re.split(r'[\r\n]+', cell.strip()):
+        line = line.strip()
+        if not line:
+            continue
         if ": " in line:
             date, url = line.split(": ", 1)
-            links.append((date, url))
+            links.append((date.strip(), url.strip()))
         else:
-            links.append((None, line))
+            links.append((None, line.strip()))
     return links
 
 def extract_links(df: pd.DataFrame, column: str = 'links') -> List[Tuple[int, Optional[str], str]]:
@@ -39,25 +44,26 @@ def extract_links(df: pd.DataFrame, column: str = 'links') -> List[Tuple[int, Op
 import regex as re  # not re — use `pip install regex`
 
 def extract_decision_text(pdf_text: Optional[str]) -> Optional[str]:
-    """
-    Extract the part after 'РЕШИЛ' (with arbitrary spaces between letters),
-    and ending before 'судья' (with arbitrary spacing). Case-insensitive.
-    """
     if not pdf_text:
         return None
-
-    # R\s*E\s*Ш\s*И\s*Л → handles Р Е Ш И Л and РЕШИЛ and messy variants
-    # same for C У Д Ь Я at the end
-    pattern = (
-        r"(?i)"                          # case-insensitive
-        r"(?:Р\s*Е\s*Ш\s*И\s*Л)"         # fuzzy "РЕШИЛ"
-        r"[\s:\.\-–—]*"                  # separator chars like ":" or space
-        r"(.*?)"                         # lazily capture content
-        r"(?:\n?.{0,15}С\s*У\s*Д\s*Ь\s*Я)"  # fuzzy "судья" anchor
-    )
-
-    match = re.search(pattern, pdf_text, re.DOTALL)
-    return match.group(1).strip() if match else None
+    
+    patterns = [
+        # Most flexible pattern - handles РЕШИЛ with any spacing, optional separator, then text until судья
+        r"(?i)(?:Р\s*Е\s*Ш\s*И\s*Л)\s*[:\.\-–—]*\s*(.*?)(?=\s*(?:С\s*У\s*Д\s*Ь\s*Я|$))",
+        # Fallback - just get everything after РЕШИЛ (any spacing)
+        r"(?i)(?:Р\s*Е\s*Ш\s*И\s*Л)\s*(.*)",
+        # Last resort - entire text
+        r"(.*)"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, pdf_text, re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+            if text:  # Only return if we got non-empty text
+                return text
+    
+    return pdf_text
 
 def initialize_output_csv(input_df: pd.DataFrame, output_path: str) -> None:
     """Initialize the output CSV with the same structure as input plus 'links_texts'."""
@@ -94,7 +100,7 @@ def append_to_csv(output_path: str, row_index: int, date: Optional[str], link: s
 def process_pdf_links(links: List[Tuple[int, Optional[str], str]], output_path: str) -> None:
     """Process PDF links, group results by row, and write incrementally to CSV."""
     # session = PDFSession(wait_sec=15, sleep_range=(1,2), headless=False)
-    session = PDFSession(wait_sec=15, headless=False)
+    session = PDFSession(wait_sec=5, headless=False)
 
     # Group links by row index
     grouped_links = defaultdict(list)
@@ -108,6 +114,8 @@ def process_pdf_links(links: List[Tuple[int, Optional[str], str]], output_path: 
 
             for date, link in date_links:
                 print(f"    [LINK] {link}")
+                print(f"DATE_LINKS {date_links} ")
+                print(link)
                 pdf_text = session.fetch_pdf_content(link)
                 decision_text = extract_decision_text(pdf_text)
                 formatted = format_output(date or "???.??.????", decision_text)
