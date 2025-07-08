@@ -66,17 +66,21 @@ def initialize_output_csv(input_df: pd.DataFrame, output_path: str) -> None:
     output_df.to_csv(output_path, index=False)
 
 def format_output(date: Optional[str], text: Optional[str]) -> str:
-    """Format the output text based on date availability."""
-    text = text if text else "Failed to extract content"
+    """Format the output text with date prefix, removing all internal newlines from text."""
+    if not text:
+        flat_text = "Failed to extract content"
+    else:
+        flat_text = " ".join(text.strip().splitlines())
+
     if not date:
-        return text
+        return flat_text
     if date == "???.??.????":
-        return f"{date}: {text}"
+        return f"{date}: {flat_text}"
     try:
-        pd.to_datetime(date, format="%d.%m.%Y")  # Validate date format
-        return f"{date}: {text}"
+        pd.to_datetime(date, format="%d.%m.%Y")  # validate format
+        return f"{date}: {flat_text}"
     except ValueError:
-        return f"???.??.????: {text}"
+        return f"???.??.????: {flat_text}"
 
 def append_to_csv(output_path: str, row_index: int, date: Optional[str], link: str, text: Optional[str]) -> None:
     output_df = pd.read_csv(output_path)

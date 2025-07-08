@@ -70,6 +70,9 @@ class PDFSession:
         logging.info(f"Sleeping for {sleep_time:.2f} seconds")
         time.sleep(sleep_time)
 
+    def close(self):
+        self.driver.quit()
+
     def fetch_pdf_content(self, url: str) -> Optional[str]:
         for attempt in range(1, self.retries + 1):
             try:
@@ -125,6 +128,3 @@ class PDFSession:
         logging.error(f"[FAILED] Could not fetch PDF after {self.retries} attempts: {url}")
         return None
 
-
-    def close(self):
-        self.driver.quit()
