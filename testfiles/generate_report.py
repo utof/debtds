@@ -1,63 +1,21 @@
 import pandas as pd
 from pathlib import Path
-from collections import defaultdict
-
-def load_region_definitions(all_regions_path, excluded_regions_path):
-    """
-    Loads region definitions from CSV files, creating maps for code-to-name,
-    name-to-codes, and a set of excluded codes.
-    """
-    try:
-        all_regions_df = pd.read_csv(all_regions_path)
-        excluded_regions_df = pd.read_csv(excluded_regions_path)
-    except FileNotFoundError as e:
-        print(f"Error: Required region definition file not found. {e}")
-        return None, None, None, None
-
-    code_to_name_map = {}
-    name_to_codes_map = defaultdict(list)
-    for _, row in all_regions_df.iterrows():
-        region_name = row['region']
-        codes = [code.strip() for code in str(row['inns']).split(',')]
-        for code in codes:
-            if code:
-                code_to_name_map[code] = region_name
-                name_to_codes_map[region_name].append(code)
-
-    excluded_codes = set()
-    for _, row in excluded_regions_df.iterrows():
-        codes = [code.strip() for code in str(row['inns']).split(',')]
-        for code in codes:
-            if code:
-                excluded_codes.add(code)
-    
-    return code_to_name_map, excluded_codes, all_regions_df, name_to_codes_map
-
-def get_region_info(inn_raw, code_to_name_map):
-    """
-    Determines region code and name from an INN, prioritizing longer codes.
-    Returns a tuple of (region_code, region_name).
-    """
-    inn = str(inn_raw).zfill(10)
-    if not inn.isdigit():
-        return "Invalid", "Invalid INN"
-    
-    for length in range(3, 1, -1):
-        prefix = inn[:length]
-        if prefix in code_to_name_map:
-            return prefix, code_to_name_map[prefix]
-            
-    return inn[:2], "Unknown Code"
+from region_utils import load_region_definitions, get_region_info
 
 def generate_report(data_path, all_regions_path, excluded_regions_path, report_output_path):
     """
     Analyzes a data file and generates a comprehensive report on included,
-    excluded, and missing regions, showing all associated codes.
+    excluded, and missing regions, using the centralized region utility.
     """
-    code_to_name, excluded_codes, all_regions_df, name_to_codes = load_region_definitions(all_regions_path, excluded_regions_path)
+    # --- Load Region Definitions using the utility function ---
+    code_to_name, excluded_codes, name_to_codes, all_regions_df = load_region_definitions(
+        all_regions_path, excluded_regions_path
+    )
     if code_to_name is None:
+        print("Failed to load region definitions. Exiting report generation.")
         return
 
+    # --- Load Data ---
     try:
         df = pd.read_csv(data_path, dtype={'debtor_inn': str})
         if 'debtor_inn' not in df.columns:
@@ -67,10 +25,10 @@ def generate_report(data_path, all_regions_path, excluded_regions_path, report_o
         print(f"Error: Input data file not found at {data_path}")
         return
     except Exception as e:
-        print(f"Error reading data file: {e}")
+        print(f"An error occurred while reading the data file: {e}")
         return
 
-    # --- Process Data ---
+    # --- Process Data using the utility function ---
     region_info = df['debtor_inn'].apply(lambda inn: get_region_info(inn, code_to_name))
     df['matched_code'] = region_info.str[0]
     df['region_name'] = region_info.str[1]
@@ -82,9 +40,9 @@ def generate_report(data_path, all_regions_path, excluded_regions_path, report_o
         sample_debtor_inn=('debtor_inn', 'first')
     ).reset_index()
 
-    # Add the column with all possible codes for the region
+    # Add the column with all possible codes for each region
     report_df['all_region_codes'] = report_df['region_name'].map(name_to_codes).apply(
-        lambda x: ', '.join(x) if x else ''
+        lambda x: ', '.join(sorted(x)) if x else ''
     )
     
     # Reorder columns for the final report
@@ -115,7 +73,7 @@ def generate_report(data_path, all_regions_path, excluded_regions_path, report_o
         else:
             for region in missing_regions:
                 codes = name_to_codes.get(region, [])
-                f.write(f"- {region} (Codes: {', '.join(codes)})\n")
+                f.write(f"- {region} (Codes: {', '.join(sorted(codes))})\n")
 
     print(f"Comprehensive report has been generated and saved to:\n{report_output_path}")
 

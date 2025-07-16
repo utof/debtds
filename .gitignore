@@ -4,3 +4,5 @@ mds
 *.csv
 *.json
 __pycache__
+*.txt
+*.html

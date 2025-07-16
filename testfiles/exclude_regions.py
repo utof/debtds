@@ -1,152 +1,67 @@
 import pandas as pd
 from pathlib import Path
-
-DEBUG = True
-
-def load_regions(all_regions_path, excluded_regions_path):
-    all_regions = pd.read_csv(all_regions_path)
-    excluded_regions = pd.read_csv(excluded_regions_path)
-
-    inn_to_region = {}
-    for _, row in all_regions.iterrows():
-        for inn in str(row['inns']).split(','):
-            inn = inn.strip().zfill(2)
-            if inn: inn_to_region[inn] = row['region']
-
-    excluded_inns = set()
-    for _, row in excluded_regions.iterrows():
-        for inn in str(row['inns']).split(','):
-            inn = inn.strip().zfill(2)
-            if inn: excluded_inns.add(inn)
-
-    return inn_to_region, excluded_inns, excluded_regions
-
-def add_regions(df, inn_to_region):
-    def get_region(inn_raw):
-        inn = str(inn_raw)
-        if len(inn) == 9:
-            inn = '0' + inn
-        if len(inn) != 10 or not inn.isdigit():
-            return ''
-        for length in range(3, 1, -1):
-            prefix = inn[:length]
-            if prefix in inn_to_region:
-                return inn_to_region[prefix]
-        return ''
-    
-    df['region'] = df['debtor_inn'].apply(get_region)
-    return df
-
-def filter_regions(df, excluded_inns):
-    def is_excluded(inn_raw):
-        inn = str(inn_raw).zfill(10)
-        for length in range(3, 1, -1):
-            if inn[:length] in excluded_inns:
-                return True
-        return False
-
-    return df[~df['debtor_inn'].apply(is_excluded)].copy()
-
-def filter_regions_debug(df, excluded_inns):
-    def check_exclusion(inn_raw):
-        inn = str(inn_raw).zfill(10)
-        if not inn.isdigit() or len(inn) != 10:
-            return True, "invalid INN"
-        for length in range(3, 1, -1):
-            prefix = inn[:length]
-            if prefix in excluded_inns:
-                return True, f"excluded region: {prefix}"
-        return False, ""
-    
-    df['will_be_removed'], df['reason'] = zip(*df['debtor_inn'].apply(check_exclusion))
-    return df
-
-def report_excluded_regions(df, excluded_inns, excluded_regions_df, output_path="excluded_report.csv"):
-    report_rows = []
-    
-    # Create a mapping from prefix to region name for efficient lookup
-    prefix_to_region_name = {}
-    for _, row in excluded_regions_df.iterrows():
-        region_name = row['region']
-        inns_list = [inn.strip() for inn in str(row['inns']).split(',')]
-        for inn in inns_list:
-            # Use zfill to match the format in excluded_inns
-            prefix_to_region_name[inn.zfill(2)] = region_name
-
-    for prefix in sorted(list(excluded_inns)):
-        matches = df[df['reason'] == f"excluded region: {prefix}"]
-        count = len(matches)
-        region_name = prefix_to_region_name.get(prefix, 'UNKNOWN')
-        
-        if count > 0:
-            sample = matches.iloc[0]
-            report_rows.append({
-                'excluded_region_code': prefix,
-                'excluded_region_name': region_name,
-                'matches': count,
-                'sample_debtor_inn': sample['debtor_inn'],
-                'sample_region': sample.get('region', '')
-            })
-        else:
-            # Also report regions that had no matches in the data
-            report_rows.append({
-                'excluded_region_code': prefix,
-                'excluded_region_name': region_name,
-                'matches': 0,
-                'sample_debtor_inn': '',
-                'sample_region': ''
-            })
-
-    report_df = pd.DataFrame(report_rows)
-    report_df.to_csv(output_path, index=False)
-    return report_df
-
-
-def report_included_regions(df, output_path="included_report.csv"):
-    """Generates a report on the included (kept) regions."""
-    included_df = df[df['region'] != ''].copy()
-
-    if included_df.empty:
-        pd.DataFrame(columns=['region_name', 'matches', 'sample_debtor_inn']).to_csv(output_path, index=False)
-        return
-
-    report = included_df.groupby('region').agg(
-        matches=('debtor_inn', 'size'),
-        sample_debtor_inn=('debtor_inn', 'first')
-    ).reset_index()
-
-    report.rename(columns={'region': 'region_name'}, inplace=True)
-    report.sort_values(by='region_name', inplace=True)
-    report.to_csv(output_path, index=False)
-    return report
+from region_utils import load_region_definitions, get_region_info
 
 def main():
-    base = Path(__file__).parent
-    input_path = base / 'res250714_400_filtered.csv'
-    all_regions_path = base / 'all_regions.csv'
-    excluded_regions_path = base / 'excluded_regions.csv'
-    output_path = base / 'filtered_regions.csv'
+    """
+    Main function to filter a CSV file by excluding specified regions.
+    It reads a data file, identifies the region for each row based on the
+    'debtor_inn', and writes a new CSV containing only the rows from
+    included regions.
+    """
+    base_dir = Path(__file__).parent
+    
+    # --- File Paths ---
+    input_data_file = base_dir / 'res250714_400_filtered.csv'
+    all_regions_file = base_dir / 'all_regions.csv'
+    excluded_regions_file = base_dir / 'excluded_regions.csv'
+    output_filtered_file = base_dir / 'filtered_regions.csv'
+    
+    # --- Load Region Definitions ---
+    # We only need the code-to-name map and the set of excluded codes for this script.
+    code_to_name, excluded_codes, _, _ = load_region_definitions(
+        all_regions_file, excluded_regions_file
+    )
+    if code_to_name is None:
+        print("Failed to load region definitions. Exiting.")
+        return
 
-    df = pd.read_csv(input_path)
-    inn_to_region, excluded_inns, excluded_regions_df = load_regions(all_regions_path, excluded_regions_path)
-    df = add_regions(df, inn_to_region)
+    # --- Load and Process Data ---
+    try:
+        df = pd.read_csv(input_data_file, dtype={'debtor_inn': str})
+        if 'debtor_inn' not in df.columns:
+            print(f"Error: Input file {input_data_file} must contain a 'debtor_inn' column.")
+            return
+    except FileNotFoundError:
+        print(f"Error: Input data file not found at {input_data_file}")
+        return
+    except Exception as e:
+        print(f"An error occurred while reading the data file: {e}")
+        return
 
-    if DEBUG:
-        df = filter_regions_debug(df, excluded_inns)
-        df.sort_values(by=['will_be_removed', 'region'], ascending=[False, True], inplace=True)
-        # Move debug cols left
-        cols = ['region', 'will_be_removed', 'reason'] + [c for c in df.columns if c not in ['region', 'will_be_removed', 'reason']]
-        df_debug = df[cols]
-        df_debug.to_csv(base / 'debug_output.csv', index=False)
-        report_excluded_regions(df, excluded_inns, excluded_regions_df, output_path=base / 'excluded_report.csv')
-        # Clean output
-        df = df[~df['will_be_removed']].drop(columns=['will_be_removed', 'reason'])
-    else:
-        # Normal (non-debug) flow
-        df = filter_regions(df, excluded_inns)
+    # --- Identify Region for Each Row ---
+    # Apply the centralized get_region_info function
+    region_info = df['debtor_inn'].apply(lambda inn: get_region_info(inn, code_to_name))
+    df['matched_code'] = region_info.str[0]
+    df['region_name'] = region_info.str[1]
 
-    report_included_regions(df, output_path=base / 'included_report.csv')
-    df.to_csv(output_path, index=False)
+    # --- Filter Out Excluded Regions ---
+    # A row is kept if its matched code is NOT in the set of excluded codes
+    initial_rows = len(df)
+    filtered_df = df[~df['matched_code'].isin(excluded_codes)].copy()
+    final_rows = len(filtered_df)
+
+    # --- Save Filtered Data ---
+    # Drop the temporary helper columns before saving
+    filtered_df.drop(columns=['matched_code'], inplace=True)
+    filtered_df.to_csv(output_filtered_file, index=False)
+
+    print(f"Processing complete.")
+    print(f"Initial rows: {initial_rows}")
+    print(f"Excluded rows: {initial_rows - final_rows}")
+    print(f"Final rows: {final_rows}")
+    print(f"Filtered data saved to: {output_filtered_file}")
+
 
 if __name__ == '__main__':
     main()
