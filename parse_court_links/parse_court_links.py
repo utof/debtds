@@ -1,3 +1,5 @@
+# File: parse_court_links.py
+
 import json
 import logging
 import os
@@ -9,26 +11,26 @@ import requests
 from dotenv import load_dotenv
 
 # --- Configuration ---
+# Configure logging to output to both console and a file
+log_file_path = "parse_court_links.log"
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(log_file_path, mode='w', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
-# save to file
-file_handler = logging.FileHandler("parse_court_links.log")
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-logging.getLogger().addHandler(file_handler)
-
-
 
 # Load environment variables from .env file
 load_dotenv()
 
 # --- Constants ---
 BASE_URL = "https://api-cloud.ru/api/kad_arbitr.php"
-API_TIMEOUT = 120  # As recommended by the API documentation
+API_TIMEOUT = 120  # Seconds, as recommended by the API documentation
 CACHE_FILE = "_cache_parse_court_links.json"
 
-# Result messages
+# Result messages based on your instructions
 RESULT_NO_CASES_FOUND = "нет результатов, нужна ручная проверка"
 RESULT_NO_SUITABLE_DOCS = "Подходящие документы не найдены"
 RESULT_API_ERROR = "API Error during processing"
@@ -66,24 +68,25 @@ def save_cache(cache_path: Path, cache: CacheDict):
         logging.error(f"Could not save cache to {cache_path}: {e}")
 
 
-# --- 2. Core API Interaction Functions (Unchanged) ---
+# --- 2. Core API Interaction Functions ---
 
 def get_api_token() -> Optional[str]:
     """Retrieves the API token from environment variables."""
     token = os.getenv("api_cloud")
     if not token:
-        logging.error("api_cloud not found in .env file.")
+        logging.error("FATAL: 'api_cloud' token not found in .env file. Please create it.")
     return token
 
 
 def make_api_request(params: ApiParams) -> Optional[JsonDict]:
-    """Makes a GET request to the API Cloud endpoint."""
+    """Makes a GET request to the API Cloud endpoint with error handling."""
     try:
         response = requests.get(BASE_URL, params=params, timeout=API_TIMEOUT)
-        response.raise_for_status()
+        response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
         json_response = response.json()
         if json_response.get("status") != 200:
-            logging.warning(f"API returned non-200 status: {json_response.get('errormsg')}")
+            error_msg = json_response.get('errormsg', 'Unknown API error')
+            logging.warning(f"API returned non-200 status: {error_msg}")
             return None
         return json_response
     except requests.exceptions.RequestException as e:
@@ -92,93 +95,104 @@ def make_api_request(params: ApiParams) -> Optional[JsonDict]:
 
 
 def search_cases(token: str, debtor_inn: str, creditor_inn: str) -> Optional[List[str]]:
-    """Performs a 'search' API call to find case IDs."""
+    """Performs a 'search' API call to find case IDs based on your rules."""
+    logging.info(f"Searching for cases with Debtor(Resp): {debtor_inn}, Creditor(Plaint): {creditor_inn}")
     params: ApiParams = [
-        ("token", token), ("type", "search"), ("CaseType", "G"),
-        ("participant", debtor_inn), ("participantType", "1"),
-        ("participant", creditor_inn), ("participantType", "0"),
+        ("token", token),
+        ("type", "search"),
+        ("CaseType", "G"),  # [G] - только гражданские дела
+        ("participant", debtor_inn),
+        ("participantType", "1"),  # [1] - ответчик
+        ("participant", creditor_inn),
+        ("participantType", "0"),  # [0] - истец
     ]
     response = make_api_request(params)
     if response and response.get("Result"):
-        return [item["caseId"] for item in response["Result"] if "caseId" in item]
+        case_ids = [item["caseId"] for item in response["Result"] if "caseId" in item]
+        logging.info(f"Found {len(case_ids)} potential case(s).")
+        return case_ids
+    logging.info("API search returned no matching cases.")
     return []
 
 
 def get_case_info(token: str, case_id: str) -> Optional[JsonDict]:
-    """Performs a 'caseInfo' API call."""
+    """Performs a 'caseInfo' API call to get detailed case data."""
+    logging.info(f"Fetching details for CaseId: {case_id}")
     params: ApiParams = [("token", token), ("type", "caseInfo"), ("CaseId", case_id)]
-    response = make_api_request(params)
-    # logging.info(f"Fetched case info for CaseId {case_id}: {response}")
-    return response.get("Result") if response and response.get("found") else None
+    return make_api_request(params)
 
 
-# --- 3. Data Processing and Analysis Functions (Unchanged) ---
+# --- 3. Data Processing and Analysis Functions ---
 
 def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, creditor_inn: str) -> List[Document]:
     """
-    Filters events within a case to find specific court decisions, AFTER validating
+    Filters events within a case to find specific court decisions, after validating
     that the debtor and creditor INNs match the case participants' specific roles.
     """
-    # --- Your INN Validation Block (which is correct for your needs) ---
     if not case_info_json or "Result" not in case_info_json:
+        logging.warning("Case info JSON is empty or malformed. Skipping.")
         return []
 
+    # --- 1. Validate Participant Roles ---
     participants = case_info_json.get("Result", {}).get("Participants", {})
-    
-    # Create sets of all plaintiff and respondent INNs found in the case
     plaintiff_inns = {p.get("INN") for p in participants.get("Plaintiffs", []) if p.get("INN")}
     respondent_inns = {r.get("INN") for r in participants.get("Respondents", []) if r.get("INN")}
 
-    # Check if our specific creditor is among the plaintiffs AND our debtor is among the respondents
-    is_creditor_plaintiff = creditor_inn in plaintiff_inns
-    is_debtor_respondent = debtor_inn in respondent_inns
-
-    if not (is_creditor_plaintiff and is_debtor_respondent):
+    if not (creditor_inn in plaintiff_inns and debtor_inn in respondent_inns):
         case_id = case_info_json.get("Result", {}).get("CaseInfo", {}).get("CaseId", "N/A")
         logging.warning(
             f"INN role mismatch for CaseId {case_id}. "
             f"Expected Debtor(Respondent): {debtor_inn}, Creditor(Plaintiff): {creditor_inn}. "
-            f"Found Respondents: {respondent_inns}, Plaintiffs: {plaintiff_inns}. Skipping case."
+            f"Found Respondents: {respondent_inns}, Plaintiffs: {plaintiff_inns}. Skipping this case."
         )
-        return [] # Return empty list if the roles do not match
+        return []
 
-    # --- Corrected Document Extraction Logic ---
+    # --- 2. Extract Documents based on your specific rules ---
     documents: List[Document] = []
-    
-    # THIS IS THE LINE THAT WAS FIXED:
-    # We now correctly look inside the "Result" object to find "CaseInstances"
-    for instance in case_info_json.get("Result", {}).get("CaseInstances", []):
+    case_instances = case_info_json.get("Result", {}).get("CaseInstances", [])
+
+    for instance in case_instances:
         for event in instance.get("InstanceEvents", []):
             event_type = event.get("EventTypeName", "")
             content_types = event.get("ContentTypes", [])
             
-            is_decision_event = (event_type == "Решение") or \
-                                (event_type == "Решения и постановления" and any(
-                                    "решение" in str(ct).lower() for ct in content_types))
+            # Rule 1: EventTypeName is "Решение"
+            is_direct_decision = (event_type == "Решение")
             
-            if is_decision_event and event.get("File") and event.get("Date"):
-                documents.append({"Date": event["Date"], "File": event["File"]})
-    
+            # Rule 2: EventTypeName is "Решения и постановления" AND ContentTypes contains "решение"
+            is_filtered_decision = (
+                event_type == "Решения и постановления" and
+                any("решение" in str(ct).lower() for ct in content_types)
+            )
+
+            if (is_direct_decision or is_filtered_decision) and event.get("File") and event.get("Date"):
+                doc = {"Date": event["Date"], "File": event["File"]}
+                documents.append(doc)
+                logging.info(f"  -> Found matching document: {doc['Date']}")
+
     return documents
 
 
 def format_results(documents: List[Document]) -> str:
-    """Formats the list of found documents into a numbered string."""
+    """Formats the list of found documents into a sorted, numbered string."""
     if not documents:
         return RESULT_NO_SUITABLE_DOCS
     try:
+        # Sort documents by date, newest first
         sorted_docs = sorted(
-            documents, key=lambda x: pd.to_datetime(x['Date'], format='%d.%m.%Y'), reverse=True
+            documents, key=lambda x: pd.to_datetime(x['Date'], format='%d.%m.%Y', errors='coerce'), reverse=True
         )
-    except (ValueError, KeyError):
+    except (ValueError, KeyError) as e:
+        logging.warning(f"Could not sort documents by date due to format error: {e}. Using original order.")
         sorted_docs = documents
+        
     return "\n".join([f"{i+1}. {doc['Date']}: {doc['File']}" for i, doc in enumerate(sorted_docs)])
 
 
 def process_inn_pair(token: str, debtor_inn: str, creditor_inn: str) -> str:
-    """Main processing logic for a single unique INN pair."""
+    """Main processing logic for a single unique INN pair, aggregating all results."""
     case_ids = search_cases(token, debtor_inn, creditor_inn)
-    if case_ids is None:
+    if case_ids is None:  # Indicates a fatal API error during search
         return RESULT_API_ERROR
     if not case_ids:
         return RESULT_NO_CASES_FOUND
@@ -187,16 +201,20 @@ def process_inn_pair(token: str, debtor_inn: str, creditor_inn: str) -> str:
     for case_id in case_ids:
         case_info = get_case_info(token, case_id)
         if case_info:
+            # The filter function already validates roles, so we just extend the list
             documents = filter_and_extract_documents(case_info, debtor_inn, creditor_inn)
             all_documents.extend(documents)
+        else:
+            logging.warning(f"Failed to retrieve or parse caseInfo for CaseId: {case_id}")
+            
     return format_results(all_documents)
 
 
-# --- 4. Main Execution Block (Optimized for Duplicates) ---
+# --- 4. Main Execution Block ---
 
 def main():
     """Main function to run the entire script."""
-    logging.info("Script started.")
+    logging.info("--- Script Execution Started ---")
     token = get_api_token()
     if not token:
         return
@@ -221,42 +239,38 @@ def main():
         logging.info(f"Loaded {len(df)} rows from {input_file}.")
         
         if debtor_col not in df.columns or creditor_col not in df.columns:
-            logging.error(f"CSV must contain '{debtor_col}' and '{creditor_col}'.")
+            logging.error(f"CSV must contain '{debtor_col}' and '{creditor_col}' columns.")
             return
 
         cache = load_cache(cache_file)
 
-        # --- OPTIMIZATION LOGIC ---
-        # 1. Create a unique key for each row based on the INN pair.
+        # --- OPTIMIZATION: Process only unique INN pairs ---
         df['cache_key'] = df[debtor_col] + '|' + df[creditor_col]
-        
-        # 2. Identify the unique set of keys that need processing.
         unique_keys = df['cache_key'].unique()
         logging.info(f"Found {len(unique_keys)} unique INN pairs to process.")
 
-        # 3. Determine which of these unique keys are not already in the cache.
         keys_to_fetch = [key for key in unique_keys if key not in cache]
         logging.info(f"{len(keys_to_fetch)} pairs are new and will be fetched from the API.")
 
-        # 4. Process only the new keys and update the cache.
         for i, key in enumerate(keys_to_fetch):
-            logging.info(f"--- Fetching API data for new pair {i+1}/{len(keys_to_fetch)}: {key} ---")
+            logging.info(f"--- Processing new pair {i+1}/{len(keys_to_fetch)}: {key} ---")
             debtor_inn, creditor_inn = key.split('|')
             
-            result = process_inn_pair(token, debtor_inn, creditor_inn)
+            if not debtor_inn or not creditor_inn:
+                logging.warning(f"Skipping invalid pair with empty INN: {key}")
+                result = "Invalid INN provided"
+            else:
+                result = process_inn_pair(token, debtor_inn, creditor_inn)
             
-            cache[key] = result  # Add the new result to the in-memory cache
-            save_cache(cache_file, cache) # Save progress to disk immediately
+            cache[key] = result
+            save_cache(cache_file, cache) # Save progress immediately
         
-        # 5. Map the results from the now-complete cache back to the original DataFrame.
-        # This is much faster than iterating row-by-row.
-        logging.info("Mapping cached results back to the DataFrame.")
+        logging.info("All unique pairs processed. Mapping results back to the DataFrame.")
         df[output_col] = df['cache_key'].map(cache)
         
-        # 6. Clean up and save.
         df.drop(columns=['cache_key'], inplace=True)
         df.to_csv(output_file, index=False, encoding='utf-8-sig')
-        logging.info(f"Processing complete. Results saved to {output_file}")
+        logging.info(f"--- Script Execution Finished. Results saved to {output_file} ---")
 
     except Exception as e:
         logging.error(f"An unexpected error occurred during file processing: {e}", exc_info=True)
