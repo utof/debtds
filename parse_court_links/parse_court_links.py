@@ -34,6 +34,8 @@ CACHE_FILE = "_cache_parse_court_links.json"
 RESULT_NO_CASES_FOUND = "нет результатов, нужна ручная проверка"
 RESULT_NO_SUITABLE_DOCS = "Подходящие документы не найдены"
 RESULT_API_ERROR = "API Error during processing"
+RESULT_API_RETRY_ERROR = "Сетевая ошибка, требуется повторная попытка"
+
 
 # --- Type Hinting Aliases ---
 ApiParams = List[Tuple[str, str]]
@@ -78,47 +80,64 @@ def get_api_token() -> Optional[str]:
     return token
 
 
-def make_api_request(params: ApiParams) -> Optional[JsonDict]:
-    """Makes a GET request to the API Cloud endpoint with error handling."""
+def make_api_request(params: ApiParams) -> Tuple[Optional[JsonDict], bool]:
+    """
+    Makes a GET request to the API Cloud endpoint.
+    Returns a tuple: (response_json, is_retryable_error)
+    """
     try:
         response = requests.get(BASE_URL, params=params, timeout=API_TIMEOUT)
         response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
         json_response = response.json()
+        
+        # Check for API-level errors (e.g., bad token, invalid params)
         if json_response.get("status") != 200:
             error_msg = json_response.get('errormsg', 'Unknown API error')
             logging.warning(f"API returned non-200 status: {error_msg}")
-            return None
-        return json_response
+            # This is a definitive error from the API, not a network issue, so it's not retryable.
+            return None, False
+            
+        return json_response, False
+
     except requests.exceptions.RequestException as e:
-        logging.error(f"API request failed: {e}")
-        return None
+        # This catches network errors: timeouts, connection resets, etc. These are retryable.
+        logging.error(f"API request failed with a network error: {e}")
+        return None, True
 
-
-def search_cases(token: str, debtor_inn: str, creditor_inn: str) -> Optional[List[str]]:
-    """Performs a 'search' API call to find case IDs based on your rules."""
+def search_cases(token: str, debtor_inn: str, creditor_inn: str) -> Tuple[Optional[List[str]], bool]:
+    """
+    Performs a 'search' API call.
+    Returns a tuple: (list_of_case_ids, is_retryable_error)
+    """
     logging.info(f"Searching for cases with Debtor(Resp): {debtor_inn}, Creditor(Plaint): {creditor_inn}")
     params: ApiParams = [
-        ("token", token),
-        ("type", "search"),
-        ("CaseType", "G"),  # [G] - только гражданские дела
-        ("participant", debtor_inn),
-        ("participantType", "1"),  # [1] - ответчик
-        ("participant", creditor_inn),
-        ("participantType", "0"),  # [0] - истец
+        ("token", token), ("type", "search"), ("CaseType", "G"),
+        ("participant", debtor_inn), ("participantType", "1"),
+        ("participant", creditor_inn), ("participantType", "0"),
     ]
-    response = make_api_request(params)
+    
+    response, is_retryable = make_api_request(params)
+    
+    if is_retryable:
+        return None, True # Propagate the retryable error
+
     if response and response.get("Result"):
         case_ids = [item["caseId"] for item in response["Result"] if "caseId" in item]
         logging.info(f"Found {len(case_ids)} potential case(s).")
-        return case_ids
+        return case_ids, False
+        
     logging.info("API search returned no matching cases.")
-    return []
+    return [], False # No results found, but the request was successful
 
-
-def get_case_info(token: str, case_id: str) -> Optional[JsonDict]:
-    """Performs a 'caseInfo' API call to get detailed case data."""
+def get_case_info(token: str, case_id: str) -> Tuple[Optional[JsonDict], bool]:
+    """
+    Performs a 'caseInfo' API call.
+    Returns a tuple: (case_info_json, is_retryable_error)
+    """
     logging.info(f"Fetching details for CaseId: {case_id}")
     params: ApiParams = [("token", token), ("type", "caseInfo"), ("CaseId", case_id)]
+    
+    # The return from make_api_request is already in the desired format
     return make_api_request(params)
 
 
@@ -190,25 +209,34 @@ def format_results(documents: List[Document]) -> str:
 
 
 def process_inn_pair(token: str, debtor_inn: str, creditor_inn: str) -> str:
-    """Main processing logic for a single unique INN pair, aggregating all results."""
-    case_ids = search_cases(token, debtor_inn, creditor_inn)
-    if case_ids is None:  # Indicates a fatal API error during search
+    """Main processing logic for a single unique INN pair, with robust error handling."""
+    case_ids, is_retryable = search_cases(token, debtor_inn, creditor_inn)
+    
+    # If the initial search had a network failure, abort and mark for retry.
+    if is_retryable:
+        return RESULT_API_RETRY_ERROR
+        
+    if case_ids is None:  # Indicates a non-retryable API error during search
         return RESULT_API_ERROR
     if not case_ids:
         return RESULT_NO_CASES_FOUND
 
     all_documents: List[Document] = []
     for case_id in case_ids:
-        case_info = get_case_info(token, case_id)
+        case_info, is_retryable = get_case_info(token, case_id)
+        
+        # If any of the caseInfo calls fail with a network error, abort the whole pair and mark for retry.
+        if is_retryable:
+            logging.warning(f"Network error while fetching CaseId {case_id}. Marking entire pair for retry.")
+            return RESULT_API_RETRY_ERROR
+            
         if case_info:
-            # The filter function already validates roles, so we just extend the list
             documents = filter_and_extract_documents(case_info, debtor_inn, creditor_inn)
             all_documents.extend(documents)
         else:
-            logging.warning(f"Failed to retrieve or parse caseInfo for CaseId: {case_id}")
+            logging.warning(f"Failed to retrieve or parse caseInfo for CaseId: {case_id} (non-retryable error).")
             
     return format_results(all_documents)
-
 
 # --- 4. Main Execution Block ---
 
@@ -234,8 +262,6 @@ def main():
 
     try:
         df = pd.read_csv(input_file, dtype=str).fillna('')
-        df = df[[debtor_col, creditor_col, 'number']]
-        df = df.head(6)  # For testing, load only the first 50 rows
         logging.info(f"Loaded {len(df)} rows from {input_file}.")
         
         if debtor_col not in df.columns or creditor_col not in df.columns:
@@ -244,7 +270,6 @@ def main():
 
         cache = load_cache(cache_file)
 
-        # --- OPTIMIZATION: Process only unique INN pairs ---
         df['cache_key'] = df[debtor_col] + '|' + df[creditor_col]
         unique_keys = df['cache_key'].unique()
         logging.info(f"Found {len(unique_keys)} unique INN pairs to process.")
@@ -262,11 +287,18 @@ def main():
             else:
                 result = process_inn_pair(token, debtor_inn, creditor_inn)
             
-            cache[key] = result
-            save_cache(cache_file, cache) # Save progress immediately
+            # *** CRITICAL CHANGE: ONLY CACHE IF THE REQUEST WAS NOT A RETRYABLE ERROR ***
+            if result != RESULT_API_RETRY_ERROR:
+                cache[key] = result
+                save_cache(cache_file, cache) # Save progress immediately
+            else:
+                logging.warning(f"Pair {key} resulted in a network error. It will NOT be cached and will be retried on the next run.")
         
         logging.info("All unique pairs processed. Mapping results back to the DataFrame.")
+        # Map from the updated cache. Un-cached items will result in NaN.
         df[output_col] = df['cache_key'].map(cache)
+        # Fill any pairs that failed and were not cached with the retry message for clarity in the output file.
+        df[output_col].fillna(RESULT_API_RETRY_ERROR, inplace=True)
         
         df.drop(columns=['cache_key'], inplace=True)
         df.to_csv(output_file, index=False, encoding='utf-8-sig')
@@ -274,7 +306,6 @@ def main():
 
     except Exception as e:
         logging.error(f"An unexpected error occurred during file processing: {e}", exc_info=True)
-
 
 if __name__ == "__main__":
     main()
