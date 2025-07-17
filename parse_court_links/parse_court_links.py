@@ -28,7 +28,7 @@ load_dotenv()
 # --- Constants ---
 BASE_URL = "https://api-cloud.ru/api/kad_arbitr.php"
 API_TIMEOUT = 120  # Seconds, as recommended by the API documentation
-CACHE_FILE = "_cache_parse_court_links.json"
+CACHE_FILE = "_930pm071725cache_parse_court_links.json"
 
 # Result messages based on your instructions
 RESULT_NO_CASES_FOUND = "нет результатов, нужна ручная проверка"
@@ -106,28 +106,61 @@ def make_api_request(params: ApiParams) -> Tuple[Optional[JsonDict], bool]:
 
 def search_cases(token: str, debtor_inn: str, creditor_inn: str) -> Tuple[Optional[List[str]], bool]:
     """
-    Performs a 'search' API call.
+    Performs a 'search' API call, iterating through all pages of results.
     Returns a tuple: (list_of_case_ids, is_retryable_error)
     """
     logging.info(f"Searching for cases with Debtor(Resp): {debtor_inn}, Creditor(Plaint): {creditor_inn}")
-    params: ApiParams = [
+    
+    # Base parameters for all requests for this INN pair
+    base_params: ApiParams = [
         ("token", token), ("type", "search"), ("CaseType", "G"),
         ("participant", debtor_inn), ("participantType", "1"),
         ("participant", creditor_inn), ("participantType", "0"),
     ]
     
-    response, is_retryable = make_api_request(params)
+    # --- Step 1: Make the first request to get total pages ---
+    first_page_params = base_params + [("page", "1")]
+    response, is_retryable = make_api_request(first_page_params)
     
     if is_retryable:
-        return None, True # Propagate the retryable error
-
-    if response and response.get("Result"):
-        case_ids = [item["caseId"] for item in response["Result"] if "caseId" in item]
-        logging.info(f"Found {len(case_ids)} potential case(s).")
-        return case_ids, False
+        return None, True  # Network error on the very first request, abort.
+    
+    if response is None or not response.get("Result"):
+        logging.info("API search returned no matching cases on the first page.")
+        return [], False  # Successful request, but no results found.
         
-    logging.info("API search returned no matching cases.")
-    return [], False # No results found, but the request was successful
+    # --- Step 2: Initialize results and determine total pages ---
+    all_case_ids = [item["caseId"] for item in response["Result"] if "caseId" in item]
+    
+    try:
+        # Safely get and convert PagesCount. Default to 1 if not present.
+        pages_count = int(response.get("PagesCount", 1))
+    except (ValueError, TypeError):
+        logging.warning(f"Could not parse 'PagesCount' from API response: {response.get('PagesCount')}. Assuming only one page.")
+        pages_count = 1
+        
+    # --- Step 3: Loop through remaining pages if they exist ---
+    if pages_count > 1:
+        logging.info(f"Found {pages_count} total pages. Fetching remaining {pages_count - 1} pages...")
+        for page_num in range(2, pages_count + 1):
+            logging.info(f"  -> Fetching page {page_num}/{pages_count}...")
+            
+            paged_params = base_params + [("page", str(page_num))]
+            paged_response, is_retryable = make_api_request(paged_params)
+            
+            if is_retryable:
+                logging.error(f"Network error while fetching page {page_num}. Aborting this INN pair and marking for retry.")
+                return None, True  # If any subsequent page fails with a network error, the whole operation is retryable.
+            
+            if paged_response and paged_response.get("Result"):
+                new_ids = [item["caseId"] for item in paged_response["Result"] if "caseId" in item]
+                all_case_ids.extend(new_ids)
+            else:
+                # This could happen if a page is empty or there's a non-retryable API error. Log it and continue.
+                logging.warning(f"Page {page_num} returned no 'Result' data or a non-200 status. Continuing...")
+
+    logging.info(f"Finished search. Total cases found across all pages: {len(all_case_ids)}.")
+    return all_case_ids, False
 
 def get_case_info(token: str, case_id: str) -> Tuple[Optional[JsonDict], bool]:
     """
@@ -177,14 +210,15 @@ def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, cred
             
             # Rule 1: EventTypeName is "Решение"
             is_direct_decision = (event_type == "Решение")
+            is_direct_decisions = (event_type == "Решения")
             
             # Rule 2: EventTypeName is "Решения и постановления" AND ContentTypes contains "решение"
             is_filtered_decision = (
                 event_type == "Решения и постановления" and
-                any("решение" in str(ct).lower() for ct in content_types)
+                any("решени" in str(ct).lower() for ct in content_types)
             )
 
-            if (is_direct_decision or is_filtered_decision) and event.get("File") and event.get("Date"):
+            if (is_direct_decision or is_direct_decisions or is_filtered_decision) and event.get("File") and event.get("Date"):
                 doc = {"Date": event["Date"], "File": event["File"]}
                 documents.append(doc)
                 logging.info(f"  -> Found matching document: {doc['Date']}")
@@ -205,7 +239,7 @@ def format_results(documents: List[Document]) -> str:
         logging.warning(f"Could not sort documents by date due to format error: {e}. Using original order.")
         sorted_docs = documents
         
-    return "\n".join([f"{i+1}. {doc['Date']}: {doc['File']}" for i, doc in enumerate(sorted_docs)])
+    return "\n".join([f"{doc['Date']}: {doc['File']}" for i, doc in enumerate(sorted_docs)])
 
 
 def process_inn_pair(token: str, debtor_inn: str, creditor_inn: str) -> str:
@@ -248,8 +282,9 @@ def main():
         return
 
     script_dir = Path(__file__).parent
-    input_file = script_dir / "testdata17.04.25.csv"
-    output_file = script_dir / "output_with_links.csv"
+    # input_file = script_dir / "testdata17.04.25.csv"
+    input_file = script_dir / "_test1.csv"
+    output_file = script_dir / "_test1_930pm071725output_with_links.csv"
     cache_file = script_dir / CACHE_FILE
     
     debtor_col = "debtor_inn"
