@@ -1,4 +1,4 @@
-# File: parse_court_links.py
+# File: sourt_links.py
 
 import json
 import logging
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 # --- Configuration ---
 # Configure logging to output to both console and a file
-log_file_path = "parse_court_links.log"
+log_file_path = "parse_court_links170725.log"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -28,7 +28,6 @@ load_dotenv()
 # --- Constants ---
 BASE_URL = "https://api-cloud.ru/api/kad_arbitr.php"
 API_TIMEOUT = 120  # Seconds, as recommended by the API documentation
-CACHE_FILE = "_930pm071725cache_parse_court_links.json"
 
 # Result messages based on your instructions
 RESULT_NO_CASES_FOUND = "нет результатов, нужна ручная проверка"
@@ -104,63 +103,102 @@ def make_api_request(params: ApiParams) -> Tuple[Optional[JsonDict], bool]:
         logging.error(f"API request failed with a network error: {e}")
         return None, True
 
-def search_cases(token: str, debtor_inn: str, creditor_inn: str) -> Tuple[Optional[List[str]], bool]:
+def search_cases(token: str, debtor_inn: str, creditor_inn: str) -> Tuple[Optional[List[JsonDict]], bool]:
     """
-    Performs a 'search' API call, iterating through all pages of results.
-    Returns a tuple: (list_of_case_ids, is_retryable_error)
+    Performs a 'search' API call and returns the full list of case result objects.
+    Returns a tuple: (list_of_case_objects, is_retryable_error)
     """
     logging.info(f"Searching for cases with Debtor(Resp): {debtor_inn}, Creditor(Plaint): {creditor_inn}")
     
-    # Base parameters for all requests for this INN pair
     base_params: ApiParams = [
         ("token", token), ("type", "search"), ("CaseType", "G"),
         ("participant", debtor_inn), ("participantType", "1"),
         ("participant", creditor_inn), ("participantType", "0"),
     ]
     
-    # --- Step 1: Make the first request to get total pages ---
-    first_page_params = base_params + [("page", "1")]
-    response, is_retryable = make_api_request(first_page_params)
+    # --- MODIFICATION START ---
+    # We will collect the full case objects, not just the IDs.
+    all_case_objects = []
+    # --- MODIFICATION END ---
     
-    if is_retryable:
-        return None, True  # Network error on the very first request, abort.
-    
-    if response is None or not response.get("Result"):
-        logging.info("API search returned no matching cases on the first page.")
-        return [], False  # Successful request, but no results found.
-        
-    # --- Step 2: Initialize results and determine total pages ---
-    all_case_ids = [item["caseId"] for item in response["Result"] if "caseId" in item]
-    
-    try:
-        # Safely get and convert PagesCount. Default to 1 if not present.
-        pages_count = int(response.get("PagesCount", 1))
-    except (ValueError, TypeError):
-        logging.warning(f"Could not parse 'PagesCount' from API response: {response.get('PagesCount')}. Assuming only one page.")
-        pages_count = 1
-        
-    # --- Step 3: Loop through remaining pages if they exist ---
-    if pages_count > 1:
-        logging.info(f"Found {pages_count} total pages. Fetching remaining {pages_count - 1} pages...")
-        for page_num in range(2, pages_count + 1):
-            logging.info(f"  -> Fetching page {page_num}/{pages_count}...")
-            
-            paged_params = base_params + [("page", str(page_num))]
-            paged_response, is_retryable = make_api_request(paged_params)
-            
-            if is_retryable:
-                logging.error(f"Network error while fetching page {page_num}. Aborting this INN pair and marking for retry.")
-                return None, True  # If any subsequent page fails with a network error, the whole operation is retryable.
-            
-            if paged_response and paged_response.get("Result"):
-                new_ids = [item["caseId"] for item in paged_response["Result"] if "caseId" in item]
-                all_case_ids.extend(new_ids)
-            else:
-                # This could happen if a page is empty or there's a non-retryable API error. Log it and continue.
-                logging.warning(f"Page {page_num} returned no 'Result' data or a non-200 status. Continuing...")
+    page_num = 1
+    total_pages = 1 
 
-    logging.info(f"Finished search. Total cases found across all pages: {len(all_case_ids)}.")
-    return all_case_ids, False
+    while page_num <= total_pages:
+        logging.info(f"  -> Fetching page {page_num}/{total_pages}...")
+        
+        paged_params = base_params + [("page", str(page_num))]
+        response, is_retryable = make_api_request(paged_params)
+        
+        if is_retryable:
+            logging.error(f"Network error while fetching page {page_num}. Aborting this INN pair and marking for retry.")
+            return None, True
+        
+        if response and response.get("Result"):
+            # --- MODIFICATION START ---
+            # Extend the list with the full result objects.
+            all_case_objects.extend(response.get("Result", []))
+            # --- MODIFICATION END ---
+            
+            try:
+                current_pages_count = int(response.get("PagesCount", 1))
+                if current_pages_count > total_pages:
+                    logging.info(f"API updated total pages from {total_pages} to {current_pages_count}.")
+                    total_pages = current_pages_count
+            except (ValueError, TypeError):
+                logging.warning(f"Could not parse 'PagesCount' from API response: {response.get('PagesCount')}. Pagination may be incomplete.")
+        
+        else:
+            logging.warning(f"Page {page_num} returned no 'Result' data or a non-200 status. Stopping pagination for this search.")
+            break
+
+        page_num += 1
+
+    if not all_case_objects:
+         logging.info("API search returned no matching cases.")
+         return [], False
+
+    logging.info(f"Finished search. Total raw case results found: {len(all_case_objects)}.")
+    # --- MODIFICATION START ---
+    # Return the list of objects.
+    return all_case_objects, False
+    # --- MODIFICATION END ---
+
+
+def filter_search_results_by_role(search_results: List[JsonDict], debtor_inn: str, creditor_inn: str) -> List[str]:
+    """
+    Pre-filters the raw results from a 'search' API call.
+    
+    It ensures that for each case, the provided creditor_inn is a plaintiff
+    and the debtor_inn is a respondent. This avoids making unnecessary
+    'caseInfo' calls for irrelevant cases.
+
+    Args:
+        search_results: The list of case objects from the 'search' API response.
+        debtor_inn: The expected INN of the respondent.
+        creditor_inn: The expected INN of the plaintiff.
+
+    Returns:
+        A list of 'caseId' strings for only the valid cases.
+    """
+    validated_case_ids = []
+    for case in search_results:
+        # The API returns INNs with trailing spaces sometimes, so we strip them.
+        # We use sets for efficient 'in' checking.
+        plaintiff_inns = {str(p.get("inn", "")).strip() for p in case.get("plaintiff", []) if p is not None and p.get("inn") is not None}
+        respondent_inns = {str(r.get("inn", "")).strip() for r in case.get("respondent", []) if r is not None and r.get("inn") is not None}
+
+        if creditor_inn in plaintiff_inns and debtor_inn in respondent_inns:
+            if "caseId" in case:
+                validated_case_ids.append(case["caseId"])
+        
+    logging.info(
+        f"Pre-filtering complete. "
+        f"Reduced {len(search_results)} raw results to {len(validated_case_ids)} cases with correct participant roles."
+    )
+    return validated_case_ids
+
+
 
 def get_case_info(token: str, case_id: str) -> Tuple[Optional[JsonDict], bool]:
     """
@@ -178,14 +216,18 @@ def get_case_info(token: str, case_id: str) -> Tuple[Optional[JsonDict], bool]:
 
 def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, creditor_inn: str) -> List[Document]:
     """
-    Filters events within a case to find specific court decisions, after validating
-    that the debtor and creditor INNs match the case participants' specific roles.
+    Filters events within a case to find specific court decisions.
+    NOTE: This function now assumes the case has already been validated
+    for correct participant roles.
     """
     if not case_info_json or "Result" not in case_info_json:
         logging.warning("Case info JSON is empty or malformed. Skipping.")
         return []
 
-    # --- 1. Validate Participant Roles ---
+    # --- MODIFICATION START ---
+    # The entire '--- 1. Validate Participant Roles ---' block has been REMOVED.
+    # The check is now done earlier and more efficiently.
+    # --- MODIFICATION END ---
     participants = case_info_json.get("Result", {}).get("Participants", {})
     plaintiff_inns = {p.get("INN") for p in participants.get("Plaintiffs", []) if p.get("INN")}
     respondent_inns = {r.get("INN") for r in participants.get("Respondents", []) if r.get("INN")}
@@ -208,11 +250,9 @@ def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, cred
             event_type = event.get("EventTypeName", "")
             content_types = event.get("ContentTypes", [])
             
-            # Rule 1: EventTypeName is "Решение"
             is_direct_decision = (event_type == "Решение")
             is_direct_decisions = (event_type == "Решения")
             
-            # Rule 2: EventTypeName is "Решения и постановления" AND ContentTypes contains "решение"
             is_filtered_decision = (
                 event_type == "Решения и постановления" and
                 any("решени" in str(ct).lower() for ct in content_types)
@@ -224,7 +264,6 @@ def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, cred
                 logging.info(f"  -> Found matching document: {doc['Date']}")
 
     return documents
-
 
 def format_results(documents: List[Document]) -> str:
     """Formats the list of found documents into a sorted, numbered string."""
@@ -242,24 +281,36 @@ def format_results(documents: List[Document]) -> str:
     return "\n".join([f"{doc['Date']}: {doc['File']}" for i, doc in enumerate(sorted_docs)])
 
 
+
 def process_inn_pair(token: str, debtor_inn: str, creditor_inn: str) -> str:
     """Main processing logic for a single unique INN pair, with robust error handling."""
-    case_ids, is_retryable = search_cases(token, debtor_inn, creditor_inn)
+    # --- MODIFICATION START ---
+    # Step 1: Get the raw search results (list of objects)
+    raw_search_results, is_retryable = search_cases(token, debtor_inn, creditor_inn)
     
-    # If the initial search had a network failure, abort and mark for retry.
     if is_retryable:
         return RESULT_API_RETRY_ERROR
         
-    if case_ids is None:  # Indicates a non-retryable API error during search
+    if raw_search_results is None:
         return RESULT_API_ERROR
-    if not case_ids:
+    if not raw_search_results:
         return RESULT_NO_CASES_FOUND
 
+    # Step 2: Pre-filter the results to get only valid case IDs
+    validated_case_ids = filter_search_results_by_role(raw_search_results, debtor_inn, creditor_inn)
+
+    if not validated_case_ids:
+        # This can happen if cases were found but none matched the exact roles
+        return RESULT_NO_CASES_FOUND
+    # --- MODIFICATION END ---
+
     all_documents: List[Document] = []
-    for case_id in case_ids:
+    # --- MODIFICATION START ---
+    # Step 3: Loop over the much smaller, validated list of IDs
+    for case_id in validated_case_ids:
+    # --- MODIFICATION END ---
         case_info, is_retryable = get_case_info(token, case_id)
         
-        # If any of the caseInfo calls fail with a network error, abort the whole pair and mark for retry.
         if is_retryable:
             logging.warning(f"Network error while fetching CaseId {case_id}. Marking entire pair for retry.")
             return RESULT_API_RETRY_ERROR
@@ -272,6 +323,7 @@ def process_inn_pair(token: str, debtor_inn: str, creditor_inn: str) -> str:
             
     return format_results(all_documents)
 
+
 # --- 4. Main Execution Block ---
 
 def main():
@@ -282,9 +334,12 @@ def main():
         return
 
     script_dir = Path(__file__).parent
-    # input_file = script_dir / "testdata17.04.25.csv"
     input_file = script_dir / "_test1.csv"
-    output_file = script_dir / "_test1_930pm071725output_with_links.csv"
+    # input_file = script_dir / "filtered_regions.csv"
+    
+    # output_file = script_dir / "courtlinks071725.csv"
+    output_file = "_test1_0817.csv"
+    CACHE_FILE = "_test1_cache1807.json"
     cache_file = script_dir / CACHE_FILE
     
     debtor_col = "debtor_inn"
@@ -297,6 +352,8 @@ def main():
 
     try:
         df = pd.read_csv(input_file, dtype=str).fillna('')
+        # df = df.head(1)
+        df = df.iloc[1:]
         logging.info(f"Loaded {len(df)} rows from {input_file}.")
         
         if debtor_col not in df.columns or creditor_col not in df.columns:
