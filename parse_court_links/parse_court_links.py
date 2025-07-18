@@ -28,12 +28,19 @@ load_dotenv()
 # --- Constants ---
 BASE_URL = "https://api-cloud.ru/api/kad_arbitr.php"
 API_TIMEOUT = 120  # Seconds, as recommended by the API documentation
+LOW_BALANCE_THRESHOLD = 100.0 # Stop processing if balance is at or below this value
 
 # Result messages based on your instructions
-RESULT_NO_CASES_FOUND = "нет результатов, нужна ручная проверка"
-RESULT_NO_SUITABLE_DOCS = "Подходящие документы не найдены"
+RESULT_NO_CASES_FOUND = "Нет результатов, нужна ручная проверка"
+RESULT_NO_SUITABLE_DOCS = "Документы с решениями не найдены"
 RESULT_API_ERROR = "API Error during processing"
 RESULT_API_RETRY_ERROR = "Сетевая ошибка, требуется повторная попытка"
+
+
+# --- Custom Exception for Balance Control ---
+class LowBalanceError(Exception):
+    """Custom exception raised when API balance is too low."""
+    pass
 
 
 # --- Type Hinting Aliases ---
@@ -88,18 +95,27 @@ def make_api_request(params: ApiParams) -> Tuple[Optional[JsonDict], bool]:
         response = requests.get(BASE_URL, params=params, timeout=API_TIMEOUT)
         response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
         json_response = response.json()
-        
-        # Check for API-level errors (e.g., bad token, invalid params)
+
+        # --- Balance Check START ---
+        if "inquiry" in json_response and "balance" in json_response["inquiry"]:
+            try:
+                current_balance = float(json_response["inquiry"]["balance"])
+                logging.info(f"API Balance updated: {current_balance:.2f}")
+                if current_balance <= LOW_BALANCE_THRESHOLD:
+                    logging.warning(f"API balance is {current_balance:.2f}, which is at or below the threshold of {LOW_BALANCE_THRESHOLD}. Stopping.")
+                    raise LowBalanceError("API balance is too low.")
+            except (ValueError, TypeError):
+                logging.warning("Could not parse balance from API response.")
+        # --- Balance Check END ---
+
         if json_response.get("status") != 200:
             error_msg = json_response.get('errormsg', 'Unknown API error')
             logging.warning(f"API returned non-200 status: {error_msg}")
-            # This is a definitive error from the API, not a network issue, so it's not retryable.
             return None, False
-            
+
         return json_response, False
 
     except requests.exceptions.RequestException as e:
-        # This catches network errors: timeouts, connection resets, etc. These are retryable.
         logging.error(f"API request failed with a network error: {e}")
         return None, True
 
@@ -116,11 +132,7 @@ def search_cases(token: str, debtor_inn: str, creditor_inn: str) -> Tuple[Option
         ("participant", creditor_inn), ("participantType", "0"),
     ]
     
-    # --- MODIFICATION START ---
-    # We will collect the full case objects, not just the IDs.
     all_case_objects = []
-    # --- MODIFICATION END ---
-    
     page_num = 1
     total_pages = 1 
 
@@ -135,10 +147,7 @@ def search_cases(token: str, debtor_inn: str, creditor_inn: str) -> Tuple[Option
             return None, True
         
         if response and response.get("Result"):
-            # --- MODIFICATION START ---
-            # Extend the list with the full result objects.
             all_case_objects.extend(response.get("Result", []))
-            # --- MODIFICATION END ---
             
             try:
                 current_pages_count = int(response.get("PagesCount", 1))
@@ -159,32 +168,15 @@ def search_cases(token: str, debtor_inn: str, creditor_inn: str) -> Tuple[Option
          return [], False
 
     logging.info(f"Finished search. Total raw case results found: {len(all_case_objects)}.")
-    # --- MODIFICATION START ---
-    # Return the list of objects.
     return all_case_objects, False
-    # --- MODIFICATION END ---
 
 
 def filter_search_results_by_role(search_results: List[JsonDict], debtor_inn: str, creditor_inn: str) -> List[str]:
     """
     Pre-filters the raw results from a 'search' API call.
-    
-    It ensures that for each case, the provided creditor_inn is a plaintiff
-    and the debtor_inn is a respondent. This avoids making unnecessary
-    'caseInfo' calls for irrelevant cases.
-
-    Args:
-        search_results: The list of case objects from the 'search' API response.
-        debtor_inn: The expected INN of the respondent.
-        creditor_inn: The expected INN of the plaintiff.
-
-    Returns:
-        A list of 'caseId' strings for only the valid cases.
     """
     validated_case_ids = []
     for case in search_results:
-        # The API returns INNs with trailing spaces sometimes, so we strip them.
-        # We use sets for efficient 'in' checking.
         plaintiff_inns = {str(p.get("inn", "")).strip() for p in case.get("plaintiff", []) if p is not None and p.get("inn") is not None}
         respondent_inns = {str(r.get("inn", "")).strip() for r in case.get("respondent", []) if r is not None and r.get("inn") is not None}
 
@@ -208,7 +200,6 @@ def get_case_info(token: str, case_id: str) -> Tuple[Optional[JsonDict], bool]:
     logging.info(f"Fetching details for CaseId: {case_id}")
     params: ApiParams = [("token", token), ("type", "caseInfo"), ("CaseId", case_id)]
     
-    # The return from make_api_request is already in the desired format
     return make_api_request(params)
 
 
@@ -217,17 +208,11 @@ def get_case_info(token: str, case_id: str) -> Tuple[Optional[JsonDict], bool]:
 def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, creditor_inn: str) -> List[Document]:
     """
     Filters events within a case to find specific court decisions.
-    NOTE: This function now assumes the case has already been validated
-    for correct participant roles.
     """
     if not case_info_json or "Result" not in case_info_json:
         logging.warning("Case info JSON is empty or malformed. Skipping.")
         return []
 
-    # --- MODIFICATION START ---
-    # The entire '--- 1. Validate Participant Roles ---' block has been REMOVED.
-    # The check is now done earlier and more efficiently.
-    # --- MODIFICATION END ---
     participants = case_info_json.get("Result", {}).get("Participants", {})
     plaintiff_inns = {p.get("INN") for p in participants.get("Plaintiffs", []) if p.get("INN")}
     respondent_inns = {r.get("INN") for r in participants.get("Respondents", []) if r.get("INN")}
@@ -241,7 +226,6 @@ def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, cred
         )
         return []
 
-    # --- 2. Extract Documents based on your specific rules ---
     documents: List[Document] = []
     case_instances = case_info_json.get("Result", {}).get("CaseInstances", [])
 
@@ -270,7 +254,6 @@ def format_results(documents: List[Document]) -> str:
     if not documents:
         return RESULT_NO_SUITABLE_DOCS
     try:
-        # Sort documents by date, newest first
         sorted_docs = sorted(
             documents, key=lambda x: pd.to_datetime(x['Date'], format='%d.%m.%Y', errors='coerce'), reverse=True
         )
@@ -284,8 +267,6 @@ def format_results(documents: List[Document]) -> str:
 
 def process_inn_pair(token: str, debtor_inn: str, creditor_inn: str) -> str:
     """Main processing logic for a single unique INN pair, with robust error handling."""
-    # --- MODIFICATION START ---
-    # Step 1: Get the raw search results (list of objects)
     raw_search_results, is_retryable = search_cases(token, debtor_inn, creditor_inn)
     
     if is_retryable:
@@ -296,19 +277,13 @@ def process_inn_pair(token: str, debtor_inn: str, creditor_inn: str) -> str:
     if not raw_search_results:
         return RESULT_NO_CASES_FOUND
 
-    # Step 2: Pre-filter the results to get only valid case IDs
     validated_case_ids = filter_search_results_by_role(raw_search_results, debtor_inn, creditor_inn)
 
     if not validated_case_ids:
-        # This can happen if cases were found but none matched the exact roles
-        return RESULT_NO_CASES_FOUND
-    # --- MODIFICATION END ---
+        return RESULT_NO_SUITABLE_DOCS
 
     all_documents: List[Document] = []
-    # --- MODIFICATION START ---
-    # Step 3: Loop over the much smaller, validated list of IDs
     for case_id in validated_case_ids:
-    # --- MODIFICATION END ---
         case_info, is_retryable = get_case_info(token, case_id)
         
         if is_retryable:
@@ -334,13 +309,9 @@ def main():
         return
 
     script_dir = Path(__file__).parent
-    input_file = script_dir / "_test1.csv"
-    # input_file = script_dir / "filtered_regions.csv"
-    
-    # output_file = script_dir / "courtlinks071725.csv"
-    output_file = "_test1_0817.csv"
-    CACHE_FILE = "_test1_cache1807.json"
-    cache_file = script_dir / CACHE_FILE
+    input_file = script_dir / "filtered_regions_descending_groupsum.csv"
+    output_file = script_dir / "filtered_reigons_with_links.csv"
+    cache_file = script_dir / "cache_filtered_reigons_with_links.json"
     
     debtor_col = "debtor_inn"
     creditor_col = "creditor_inn"
@@ -352,8 +323,6 @@ def main():
 
     try:
         df = pd.read_csv(input_file, dtype=str).fillna('')
-        # df = df.head(1)
-        df = df.iloc[1:]
         logging.info(f"Loaded {len(df)} rows from {input_file}.")
         
         if debtor_col not in df.columns or creditor_col not in df.columns:
@@ -369,27 +338,30 @@ def main():
         keys_to_fetch = [key for key in unique_keys if key not in cache]
         logging.info(f"{len(keys_to_fetch)} pairs are new and will be fetched from the API.")
 
-        for i, key in enumerate(keys_to_fetch):
-            logging.info(f"--- Processing new pair {i+1}/{len(keys_to_fetch)}: {key} ---")
-            debtor_inn, creditor_inn = key.split('|')
-            
-            if not debtor_inn or not creditor_inn:
-                logging.warning(f"Skipping invalid pair with empty INN: {key}")
-                result = "Invalid INN provided"
-            else:
-                result = process_inn_pair(token, debtor_inn, creditor_inn)
-            
-            # *** CRITICAL CHANGE: ONLY CACHE IF THE REQUEST WAS NOT A RETRYABLE ERROR ***
-            if result != RESULT_API_RETRY_ERROR:
-                cache[key] = result
-                save_cache(cache_file, cache) # Save progress immediately
-            else:
-                logging.warning(f"Pair {key} resulted in a network error. It will NOT be cached and will be retried on the next run.")
+        # --- MODIFIED Main Loop with Balance Check ---
+        try:
+            for i, key in enumerate(keys_to_fetch):
+                logging.info(f"--- Processing new pair {i+1}/{len(keys_to_fetch)}: {key} ---")
+                debtor_inn, creditor_inn = key.split('|')
+                
+                if not debtor_inn or not creditor_inn:
+                    logging.warning(f"Skipping invalid pair with empty INN: {key}")
+                    result = "Invalid INN provided"
+                else:
+                    result = process_inn_pair(token, debtor_inn, creditor_inn)
+                
+                if result != RESULT_API_RETRY_ERROR:
+                    cache[key] = result
+                    save_cache(cache_file, cache)
+                else:
+                    logging.warning(f"Pair {key} resulted in a network error. It will NOT be cached and will be retried on the next run.")
         
-        logging.info("All unique pairs processed. Mapping results back to the DataFrame.")
-        # Map from the updated cache. Un-cached items will result in NaN.
+        except LowBalanceError:
+            logging.warning("Low API balance detected. Halting processing and proceeding to save partial results.")
+        # --- End of Modified Loop ---
+        
+        logging.info("Mapping results back to the DataFrame.")
         df[output_col] = df['cache_key'].map(cache)
-        # Fill any pairs that failed and were not cached with the retry message for clarity in the output file.
         df[output_col].fillna(RESULT_API_RETRY_ERROR, inplace=True)
         
         df.drop(columns=['cache_key'], inplace=True)
