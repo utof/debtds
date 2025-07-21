@@ -11,8 +11,6 @@ import requests
 from dotenv import load_dotenv
 
 # --- Configuration ---
-# Configure logging to output to both console and a file
-
 # Load environment variables from .env file
 load_dotenv()
 
@@ -38,7 +36,7 @@ class LowBalanceError(Exception):
 ApiParams = List[Tuple[str, str]]
 JsonDict = Dict[str, Any]
 Document = Dict[str, str]
-CacheDict = Dict[str, Any] # Modified to handle more complex cache structures
+CacheDict = Dict[str, Any]
 
 
 # --- 1. Caching Functions ---
@@ -112,31 +110,29 @@ def make_api_request(params: ApiParams) -> Tuple[Optional[JsonDict], bool]:
 
 def search_cases(
     token: str, debtor_inn: str, creditor_inn: str, search_cache: CacheDict
-) -> Tuple[Optional[List[JsonDict]], Optional[Dict[str, Set[str]]], bool]:
+) -> Tuple[Optional[List[str]], bool]:
     """
-    Performs a 'search' API call, using a cache.
-    Returns a tuple: (list_of_case_responses, found_names_dict, is_retryable_error)
+    Performs a 'search' API call using the new multi-participant format.
+    Returns a tuple: (list_of_case_ids, is_retryable_error)
     """
     inn_pair_key = f"{debtor_inn}|{creditor_inn}"
     if inn_pair_key in search_cache:
-        logging.info(f"Cache HIT for search: {inn_pair_key}. Using cached data.")
-        cached_data = search_cache[inn_pair_key]
-        # Convert lists back to sets for names
-        names = {
-            'debtor': set(cached_data.get('names', {}).get('debtor', [])),
-            'creditor': set(cached_data.get('names', {}).get('creditor', []))
-        }
-        return cached_data.get('responses', []), names, False
+        logging.info(f"Cache HIT for search: {inn_pair_key}. Using cached case IDs.")
+        return search_cache[inn_pair_key], False
 
     logging.info(f"Cache MISS for search: {inn_pair_key}. Calling API.")
+    
+    # New, more efficient multi-participant format
+    multi_participant_str = f"{creditor_inn}:0,{debtor_inn}:1"
+    
     base_params: ApiParams = [
-        ("token", token), ("type", "search"), ("CaseType", "G"),
-        ("participant", debtor_inn), ("participantType", "1"),
-        ("participant", creditor_inn), ("participantType", "0"),
+        ("token", token),
+        ("type", "search"),
+        ("CaseType", "G"),
+        ("participant", multi_participant_str),
     ]
     
-    all_page_responses = []
-    found_names = {'debtor': set(), 'creditor': set()}
+    all_case_ids: Set[str] = set()
     page_num = 1
     total_pages = 1
 
@@ -146,79 +142,36 @@ def search_cases(
         response, is_retryable = make_api_request(paged_params)
         
         if is_retryable:
-            return None, None, True
+            return None, True
         
         if response and response.get("Result"):
-            all_page_responses.append(response)
-            
-            # Extract names while iterating
             for case in response.get("Result", []):
-                for p in case.get("plaintiff", []):
-                    if p and str(p.get("inn", "")).strip() == creditor_inn and p.get("name"):
-                        found_names['creditor'].add(p['name'])
-                for r in case.get("respondent", []):
-                    if r and str(r.get("inn", "")).strip() == debtor_inn and r.get("name"):
-                        found_names['debtor'].add(r['name'])
+                if "caseId" in case:
+                    all_case_ids.add(case["caseId"])
 
             try:
-                current_pages_count = int(response.get("PagesCount", 1))
+                # Determine total pages only on the first successful request
                 if page_num == 1:
-                    total_pages = current_pages_count
+                    total_pages = int(response.get("PagesCount", 1))
             except (ValueError, TypeError):
                 logging.warning(f"Could not parse 'PagesCount'. Pagination may be incomplete.")
+                break # Stop paginating if count is unreliable
         else:
+            # Stop if there's no result or an error occurred
             break
         page_num += 1
 
-    if not all_page_responses:
+    if not all_case_ids:
          logging.info("API search returned no matching cases.")
-         return [], {}, False
+         search_cache[inn_pair_key] = [] # Cache the empty result
+         return [], False
 
-    logging.info(f"Finished search. Found names: Debtor: {found_names['debtor']}, Creditor: {found_names['creditor']}")
+    sorted_case_ids = sorted(list(all_case_ids))
+    logging.info(f"Finished search. Found {len(sorted_case_ids)} unique case(s).")
     
     # Save to cache before returning
-    search_cache[inn_pair_key] = {
-        'responses': all_page_responses,
-        'names': {
-            'debtor': list(found_names['debtor']),
-            'creditor': list(found_names['creditor'])
-        }
-    }
-    return all_page_responses, found_names, False
-
-
-def filter_search_results_by_role(
-    search_responses: List[JsonDict], debtor_inn: str, creditor_inn: str, found_names: Dict[str, Set[str]]
-) -> List[str]:
-    """
-    Pre-filters the raw results from a 'search' API call using INN and Name.
-    This function operates on ALREADY DOWNLOADED data.
-    """
-    validated_case_ids = []
-    all_results = [case for resp in search_responses for case in resp.get("Result", [])]
-
-    for case in all_results:
-        # Check if any plaintiff matches the creditor's INN or one of its known names
-        is_creditor_in_plaintiffs = any(
-            str(p.get("inn", "")).strip() == creditor_inn or p.get("name") in found_names['creditor']
-            for p in case.get("plaintiff", []) if p
-        )
-        # Check if any respondent matches the debtor's INN or one of its known names
-        is_debtor_in_respondents = any(
-            str(r.get("inn", "")).strip() == debtor_inn or r.get("name") in found_names['debtor']
-            for r in case.get("respondent", []) if r
-        )
-
-        if is_creditor_in_plaintiffs and is_debtor_in_respondents:
-            if "caseId" in case:
-                validated_case_ids.append(case["caseId"])
-        
-    unique_case_ids = sorted(list(set(validated_case_ids)))
-    logging.info(
-        f"Pre-filtering complete. "
-        f"Reduced {len(all_results)} raw results to {len(unique_case_ids)} unique cases with correct participants."
-    )
-    return unique_case_ids
+    search_cache[inn_pair_key] = sorted_case_ids
+    return sorted_case_ids, False
 
 
 def get_case_info(token: str, case_id: str, case_info_cache: CacheDict) -> Tuple[Optional[JsonDict], bool]:
@@ -242,26 +195,12 @@ def get_case_info(token: str, case_id: str, case_info_cache: CacheDict) -> Tuple
 
 # --- 3. Data Processing and Analysis Functions ---
 
-def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, creditor_inn: str) -> List[Document]:
+def filter_and_extract_documents(case_info_json: JsonDict) -> List[Document]:
     """
-    Filters events within a case to find specific court decisions.
+    Filters events within a case to find specific court decisions based on your rules.
     """
-    if not case_info_json or "Result" not in case_info_json or not case_info_json.get("Result"):
+    if not case_info_json or not case_info_json.get("Result"):
         logging.warning("Case info JSON is empty or malformed. Skipping.")
-        return []
-
-    # This secondary check is still valuable as a safeguard
-    participants = case_info_json.get("Result", {}).get("Participants", {})
-    plaintiff_inns = {p.get("INN") for p in participants.get("Plaintiffs", []) if p.get("INN")}
-    respondent_inns = {r.get("INN") for r in participants.get("Respondents", []) if r.get("INN")}
-
-    if not (creditor_inn in plaintiff_inns and debtor_inn in respondent_inns):
-        case_id = case_info_json.get("Result", {}).get("CaseInfo", {}).get("CaseId", "N/A")
-        logging.warning(
-            f"INN role mismatch in caseInfo for CaseId {case_id}. "
-            f"Expected Debtor(R): {debtor_inn}, Creditor(P): {creditor_inn}. "
-            f"Found Respondents: {respondent_inns}, Plaintiffs: {plaintiff_inns}. Skipping this case."
-        )
         return []
 
     documents: List[Document] = []
@@ -272,15 +211,19 @@ def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, cred
             event_type = event.get("EventTypeName", "")
             content_types = event.get("ContentTypes", [])
             
-            is_direct_decision = (event_type == "Решение")
-            is_direct_decisions = (event_type == "Решения")
+            # Rule 1: EventTypeName is "Решение" or "Решения"
+            is_direct_decision = event_type in ("Решение", "Решения")
             
+            # Rule 2: EventTypeName is "Решения и постановления" AND ContentTypes contains "решение"
             is_filtered_decision = (
-                event_type == "Решения и постановления" and
-                any("решени" in str(ct).lower() for ct in content_types)
+                event_type == "Решения и постановления"
+                and any(
+                    "решени" in str(ct).lower() and "резолют" not in str(ct).lower()
+                    for ct in content_types
+                )
             )
 
-            if (is_direct_decision or is_direct_decisions or is_filtered_decision) and event.get("File") and event.get("Date"):
+            if (is_direct_decision or is_filtered_decision) and event.get("File") and event.get("Date"):
                 doc = {"Date": event["Date"], "File": event["File"]}
                 documents.append(doc)
                 logging.info(f"  -> Found matching document: {doc['Date']}")
@@ -288,7 +231,7 @@ def filter_and_extract_documents(case_info_json: JsonDict, debtor_inn: str, cred
     return documents
 
 def format_results(documents: List[Document]) -> str:
-    """Formats the list of found documents into a sorted, numbered string."""
+    """Formats the list of found documents into a sorted, string."""
     if not documents:
         return RESULT_NO_SUITABLE_DOCS
     try:
@@ -307,22 +250,17 @@ def process_inn_pair(
     token: str, debtor_inn: str, creditor_inn: str, search_cache: CacheDict, case_info_cache: CacheDict
 ) -> str:
     """Main processing logic for a single unique INN pair, using caches."""
-    raw_search_responses, found_names, is_retryable = search_cases(token, debtor_inn, creditor_inn, search_cache)
+    case_ids, is_retryable = search_cases(token, debtor_inn, creditor_inn, search_cache)
     
     if is_retryable:
         return RESULT_API_RETRY_ERROR
-    if raw_search_responses is None:
+    if case_ids is None: # Non-retryable API error
         return RESULT_API_ERROR
-    if not raw_search_responses:
+    if not case_ids:
         return RESULT_NO_CASES_FOUND
 
-    validated_case_ids = filter_search_results_by_role(raw_search_responses, debtor_inn, creditor_inn, found_names)
-
-    if not validated_case_ids:
-        return RESULT_NO_SUITABLE_DOCS
-
     all_documents: List[Document] = []
-    for case_id in validated_case_ids:
+    for case_id in case_ids:
         case_info, is_retryable = get_case_info(token, case_id, case_info_cache)
         
         if is_retryable:
@@ -330,7 +268,7 @@ def process_inn_pair(
             return RESULT_API_RETRY_ERROR
             
         if case_info:
-            documents = filter_and_extract_documents(case_info, debtor_inn, creditor_inn)
+            documents = filter_and_extract_documents(case_info)
             all_documents.extend(documents)
         else:
             logging.warning(f"Failed to retrieve or parse caseInfo for CaseId: {case_id} (non-retryable error).")
@@ -342,22 +280,24 @@ def process_inn_pair(
 
 def main():
     """Main function to run the entire script."""
-    logging.info("--- Script Execution Started ---")
-    token = get_api_token()
-    if not token:
-        return
-
     script_dir = Path(__file__).parent
+
     # addname = "_081825_1"
-    # input_file = script_dir / "filtered_regions_descending_groupsum.csv"
-    input_file = script_dir / "_test1.csv"
-    output_file = script_dir / "_test1_TEST180725.csv"
-    # New cache file paths
-    search_cache_file = script_dir / "_TEST180725search_cache.json"
-    case_info_cache_file = script_dir / "_TEST180725caseinfo_cache.json"
-    results_cache_file = script_dir / "_TEST180725results_cache.json"
+    input_file = script_dir / "filtered_regions_descending_groupsum.csv"
+    output_file = script_dir / "filtered_r_d_g_links_2.csv"
     
-    log_file_path = script_dir / "parse_court_links180725_test180725.log"
+    # input_file = script_dir / "_test1.csv"
+    # output_file = script_dir / "_test1_2_output.csv"
+    # log_file_path = script_dir / "_test1_2.log"
+    # search_cache_file = script_dir / "_test1_2_cache_search.json"
+    # case_info_cache_file = script_dir / "_test1_2_cache_caseinfo.json"
+    # results_cache_file = script_dir / "_test1_2_cache_results.json"
+
+    search_cache_file = script_dir / "filtered_r_d_g_links_2_cache_search.json"
+    case_info_cache_file = script_dir / "filtered_r_d_g_links_1_cache_caseinfo.json"
+    results_cache_file = script_dir / "filtered_r_d_g_links_2_cache_results.json"
+
+    log_file_path = script_dir / "filtered_r_d_g_links_2.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -366,6 +306,10 @@ def main():
             logging.StreamHandler()
         ]
     )
+    logging.info("--- Script Execution Started ---")
+    token = get_api_token()
+    if not token:
+        return
 
     debtor_col = "debtor_inn"
     creditor_col = "creditor_inn"
@@ -388,27 +332,36 @@ def main():
         case_info_cache = load_cache(case_info_cache_file)
         results_cache = load_cache(results_cache_file)
 
-        df['cache_key'] = df[debtor_col] + '|' + df[creditor_col]
+        # Create a key for unique INN pairs to process
+        df['cache_key'] = df[debtor_col].str.strip() + '|' + df[creditor_col].str.strip()
         unique_keys = df['cache_key'].unique()
         logging.info(f"Found {len(unique_keys)} unique INN pairs to process.")
 
+        # Process only keys that are not already in the final results cache
         keys_to_fetch = [key for key in unique_keys if key not in results_cache]
         logging.info(f"{len(keys_to_fetch)} pairs are new (or failed previously) and will be processed.")
 
         try:
             for i, key in enumerate(keys_to_fetch):
                 logging.info(f"--- Processing new pair {i+1}/{len(keys_to_fetch)}: {key} ---")
-                debtor_inn, creditor_inn = key.split('|')
                 
+                try:
+                    debtor_inn, creditor_inn = key.split('|')
+                except ValueError:
+                    logging.warning(f"Skipping invalid key format: {key}")
+                    results_cache[key] = "Invalid INN pair key"
+                    continue
+
                 if not debtor_inn or not creditor_inn:
                     logging.warning(f"Skipping invalid pair with empty INN: {key}")
                     result = "Invalid INN provided"
                 else:
                     result = process_inn_pair(token, debtor_inn, creditor_inn, search_cache, case_info_cache)
                 
+                # Only cache final results, not retryable errors
                 if result != RESULT_API_RETRY_ERROR:
                     results_cache[key] = result
-                    # Save all caches on success
+                    # Save all caches on success to prevent data loss
                     save_cache(search_cache_file, search_cache)
                     save_cache(case_info_cache_file, case_info_cache)
                     save_cache(results_cache_file, results_cache)
@@ -420,6 +373,7 @@ def main():
         
         logging.info("Mapping results back to the DataFrame.")
         df[output_col] = df['cache_key'].map(results_cache)
+        # Mark rows that were skipped due to errors for easy filtering
         df[output_col].fillna(RESULT_API_RETRY_ERROR, inplace=True)
         
         df.drop(columns=['cache_key'], inplace=True)
