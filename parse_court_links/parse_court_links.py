@@ -109,41 +109,42 @@ def make_api_request(params: ApiParams) -> Tuple[Optional[JsonDict], bool]:
         return None, True
 
 def search_cases(
-    token: str, debtor_inn: str, creditor_inn: str, search_cache: CacheDict
-) -> Tuple[Optional[List[str]], bool]:
+    token: str, debtor_inn: str, creditor_inn: str, search_cache: CacheDict, max_pages_to_fetch: int
+) -> Tuple[Optional[List[str]], bool, Optional[str]]:
     """
     Performs a 'search' API call using the new multi-participant format.
-    Returns a tuple: (list_of_case_ids, is_retryable_error)
+    Returns a tuple: (list_of_case_ids, is_retryable_error, page_limit_warning_message)
     """
     inn_pair_key = f"{debtor_inn}|{creditor_inn}"
     if inn_pair_key in search_cache:
         logging.info(f"Cache HIT for search: {inn_pair_key}. Using cached case IDs.")
-        return search_cache[inn_pair_key], False
+        return search_cache[inn_pair_key], False, None
 
     logging.info(f"Cache MISS for search: {inn_pair_key}. Calling API.")
-    
+
     # New, more efficient multi-participant format
     multi_participant_str = f"{creditor_inn}:0,{debtor_inn}:1"
-    
+
     base_params: ApiParams = [
         ("token", token),
         ("type", "search"),
         ("CaseType", "G"),
         ("participant", multi_participant_str),
     ]
-    
+
     all_case_ids: Set[str] = set()
     page_num = 1
     total_pages = 1
+    page_limit_warning: Optional[str] = None
 
-    while page_num <= total_pages:
-        logging.info(f"  -> Fetching page {page_num}/{total_pages}...")
+    while page_num <= total_pages and page_num <= max_pages_to_fetch:
+        logging.info(f"  -> Fetching page {page_num}/{total_pages} (limit: {max_pages_to_fetch})...")
         paged_params = base_params + [("page", str(page_num))]
         response, is_retryable = make_api_request(paged_params)
-        
+
         if is_retryable:
-            return None, True
-        
+            return None, True, None
+
         if response and response.get("Result"):
             for case in response.get("Result", []):
                 if "caseId" in case:
@@ -153,6 +154,10 @@ def search_cases(
                 # Determine total pages only on the first successful request
                 if page_num == 1:
                     total_pages = int(response.get("PagesCount", 1))
+                    if total_pages > max_pages_to_fetch:
+                        page_limit_warning = f"собрано только {max_pages_to_fetch}/{total_pages} страниц"
+                        logging.warning(f"Page limit hit for {inn_pair_key}: Will fetch {max_pages_to_fetch} of {total_pages} pages.")
+
             except (ValueError, TypeError):
                 logging.warning(f"Could not parse 'PagesCount'. Pagination may be incomplete.")
                 break # Stop paginating if count is unreliable
@@ -164,14 +169,18 @@ def search_cases(
     if not all_case_ids:
          logging.info("API search returned no matching cases.")
          search_cache[inn_pair_key] = [] # Cache the empty result
-         return [], False
+         return [], False, None
 
     sorted_case_ids = sorted(list(all_case_ids))
     logging.info(f"Finished search. Found {len(sorted_case_ids)} unique case(s).")
-    
-    # Save to cache before returning
-    search_cache[inn_pair_key] = sorted_case_ids
-    return sorted_case_ids, False
+
+    # Save to cache before returning, ONLY if the result is complete.
+    if not page_limit_warning:
+        search_cache[inn_pair_key] = sorted_case_ids
+    else:
+        logging.info(f"Partial result due to page limit. Search result for {inn_pair_key} will NOT be cached.")
+
+    return sorted_case_ids, False, page_limit_warning
 
 
 def get_case_info(token: str, case_id: str, case_info_cache: CacheDict) -> Tuple[Optional[JsonDict], bool]:
@@ -185,11 +194,11 @@ def get_case_info(token: str, case_id: str, case_info_cache: CacheDict) -> Tuple
 
     logging.info(f"Cache MISS for caseInfo: {case_id}. Calling API.")
     params: ApiParams = [("token", token), ("type", "caseInfo"), ("CaseId", case_id)]
-    
+
     response, is_retryable = make_api_request(params)
     if not is_retryable and response:
         case_info_cache[case_id] = response # Cache successful responses
-    
+
     return response, is_retryable
 
 
@@ -210,10 +219,10 @@ def filter_and_extract_documents(case_info_json: JsonDict) -> List[Document]:
         for event in instance.get("InstanceEvents", []):
             event_type = event.get("EventTypeName", "")
             content_types = event.get("ContentTypes", [])
-            
+
             # Rule 1: EventTypeName is "Решение" or "Решения"
             is_direct_decision = event_type in ("Решение", "Решения")
-            
+
             # Rule 2: EventTypeName is "Решения и постановления" AND ContentTypes contains "решение"
             is_filtered_decision = (
                 event_type == "Решения и постановления"
@@ -242,16 +251,16 @@ def format_results(documents: List[Document]) -> str:
     except (ValueError, KeyError) as e:
         logging.warning(f"Could not sort documents by date due to format error: {e}. Using original order.")
         sorted_docs = documents
-        
+
     return "\n".join([f"{doc['Date']}: {doc['File']}" for doc in sorted_docs])
 
 
 def process_inn_pair(
-    token: str, debtor_inn: str, creditor_inn: str, search_cache: CacheDict, case_info_cache: CacheDict
+    token: str, debtor_inn: str, creditor_inn: str, search_cache: CacheDict, case_info_cache: CacheDict, max_pages_to_fetch: int
 ) -> str:
     """Main processing logic for a single unique INN pair, using caches."""
-    case_ids, is_retryable = search_cases(token, debtor_inn, creditor_inn, search_cache)
-    
+    case_ids, is_retryable, page_limit_warning = search_cases(token, debtor_inn, creditor_inn, search_cache, max_pages_to_fetch)
+
     if is_retryable:
         return RESULT_API_RETRY_ERROR
     if case_ids is None: # Non-retryable API error
@@ -262,18 +271,23 @@ def process_inn_pair(
     all_documents: List[Document] = []
     for case_id in case_ids:
         case_info, is_retryable = get_case_info(token, case_id, case_info_cache)
-        
+
         if is_retryable:
             logging.warning(f"Network error while fetching CaseId {case_id}. Marking entire pair for retry.")
             return RESULT_API_RETRY_ERROR
-            
+
         if case_info:
             documents = filter_and_extract_documents(case_info)
             all_documents.extend(documents)
         else:
             logging.warning(f"Failed to retrieve or parse caseInfo for CaseId: {case_id} (non-retryable error).")
-            
-    return format_results(all_documents)
+
+    final_result_string = format_results(all_documents)
+
+    if page_limit_warning:
+        return f"{page_limit_warning}\n{final_result_string}"
+    else:
+        return final_result_string
 
 
 # --- 4. Main Execution Block ---
@@ -281,11 +295,14 @@ def process_inn_pair(
 def main():
     """Main function to run the entire script."""
     script_dir = Path(__file__).parent
+    
+    # NEW: Maximum number of pages to fetch per search.
+    MAX_PAGES_TO_FETCH = 5
 
     # addname = "_081825_1"
-    input_file = script_dir / "filtered_regions_descending_groupsum.csv"
-    output_file = script_dir / "filtered_r_d_g_links_2.csv"
-    
+    input_file = script_dir / "filtered_regions_descend_summa_no_groups.csv"
+    output_file = script_dir / "filtered_rdsng_1_output.csv"
+
     # input_file = script_dir / "_test1.csv"
     # output_file = script_dir / "_test1_2_output.csv"
     # log_file_path = script_dir / "_test1_2.log"
@@ -293,11 +310,11 @@ def main():
     # case_info_cache_file = script_dir / "_test1_2_cache_caseinfo.json"
     # results_cache_file = script_dir / "_test1_2_cache_results.json"
 
-    search_cache_file = script_dir / "filtered_r_d_g_links_2_cache_search.json"
-    case_info_cache_file = script_dir / "filtered_r_d_g_links_1_cache_caseinfo.json"
-    results_cache_file = script_dir / "filtered_r_d_g_links_2_cache_results.json"
+    search_cache_file = script_dir / "filtered_rdsng_1_cache_search.json"
+    case_info_cache_file = script_dir / "filtered_rdsng_1_cache_caseinfo.json"
+    results_cache_file = script_dir / "filtered_rdsng_1_cache_results.json"
 
-    log_file_path = script_dir / "filtered_r_d_g_links_2.log"
+    log_file_path = script_dir / "filtered_rdsng_1.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -322,7 +339,7 @@ def main():
     try:
         df = pd.read_csv(input_file, dtype=str).fillna('')
         logging.info(f"Loaded {len(df)} rows from {input_file}.")
-        
+
         if debtor_col not in df.columns or creditor_col not in df.columns:
             logging.error(f"CSV must contain '{debtor_col}' and '{creditor_col}' columns.")
             return
@@ -344,7 +361,7 @@ def main():
         try:
             for i, key in enumerate(keys_to_fetch):
                 logging.info(f"--- Processing new pair {i+1}/{len(keys_to_fetch)}: {key} ---")
-                
+
                 try:
                     debtor_inn, creditor_inn = key.split('|')
                 except ValueError:
@@ -356,8 +373,8 @@ def main():
                     logging.warning(f"Skipping invalid pair with empty INN: {key}")
                     result = "Invalid INN provided"
                 else:
-                    result = process_inn_pair(token, debtor_inn, creditor_inn, search_cache, case_info_cache)
-                
+                    result = process_inn_pair(token, debtor_inn, creditor_inn, search_cache, case_info_cache, MAX_PAGES_TO_FETCH)
+
                 # Only cache final results, not retryable errors
                 if result != RESULT_API_RETRY_ERROR:
                     results_cache[key] = result
@@ -367,15 +384,15 @@ def main():
                     save_cache(results_cache_file, results_cache)
                 else:
                     logging.warning(f"Pair {key} resulted in a network error. It will NOT be cached and will be retried on the next run.")
-        
+
         except LowBalanceError:
             logging.warning("Low API balance detected. Halting processing and proceeding to save partial results.")
-        
+
         logging.info("Mapping results back to the DataFrame.")
         df[output_col] = df['cache_key'].map(results_cache)
         # Mark rows that were skipped due to errors for easy filtering
         df[output_col].fillna(RESULT_API_RETRY_ERROR, inplace=True)
-        
+
         df.drop(columns=['cache_key'], inplace=True)
         df.to_csv(output_file, index=False, encoding='utf-8-sig')
         logging.info(f"--- Script Execution Finished. Results saved to {output_file} ---")
