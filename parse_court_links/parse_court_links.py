@@ -108,35 +108,50 @@ def make_api_request(params: ApiParams) -> Tuple[Optional[JsonDict], bool]:
         logging.error(f"API request failed with a network error: {e}")
         return None, True
 
+# --- MODIFIED FUNCTION ---
 def search_cases(
     token: str, debtor_inn: str, creditor_inn: str, search_cache: CacheDict, max_pages_to_fetch: int
 ) -> Tuple[Optional[List[str]], bool, Optional[str]]:
     """
-    Performs a 'search' API call using the new multi-participant format.
+    Performs a 'search' API call, using a stateful cache to allow resuming.
     Returns a tuple: (list_of_case_ids, is_retryable_error, page_limit_warning_message)
     """
     inn_pair_key = f"{debtor_inn}|{creditor_inn}"
-    if inn_pair_key in search_cache:
-        logging.info(f"Cache HIT for search: {inn_pair_key}. Using cached case IDs.")
-        return search_cache[inn_pair_key], False, None
-
-    logging.info(f"Cache MISS for search: {inn_pair_key}. Calling API.")
-
-    # New, more efficient multi-participant format
-    multi_participant_str = f"{creditor_inn}:0,{debtor_inn}:1"
-
-    base_params: ApiParams = [
-        ("token", token),
-        ("type", "search"),
-        ("CaseType", "G"),
-        ("participant", multi_participant_str),
-    ]
-
+    
+    # --- Cache Handling Logic ---
+    cached_data = search_cache.get(inn_pair_key)
+    
+    # Initialize state for the search
     all_case_ids: Set[str] = set()
     page_num = 1
     total_pages = 1
-    page_limit_warning: Optional[str] = None
+    
+    if cached_data:
+        # Handle new dictionary-based cache format
+        if isinstance(cached_data, dict) and 'is_complete' in cached_data:
+            if cached_data['is_complete']:
+                logging.info(f"Cache HIT (Complete) for search: {inn_pair_key}. Using cached data.")
+                return cached_data['case_ids'], False, None
+            else:
+                logging.info(f"Cache HIT (Partial) for search: {inn_pair_key}. Resuming.")
+                all_case_ids = set(cached_data.get('case_ids', []))
+                page_num = cached_data.get('last_page_fetched', 0) + 1
+                total_pages = cached_data.get('total_pages', 1)
+        # Handle old list-based cache format (for backward compatibility)
+        elif isinstance(cached_data, list):
+            logging.info(f"Cache HIT (Legacy format) for search: {inn_pair_key}. Treating as complete.")
+            return cached_data, False, None
+    else:
+        logging.info(f"Cache MISS for search: {inn_pair_key}. Starting new search.")
 
+    # --- API Call Loop ---
+    multi_participant_str = f"{creditor_inn}:0,{debtor_inn}:1"
+    base_params: ApiParams = [
+        ("token", token), ("type", "search"), ("CaseType", "G"), ("participant", multi_participant_str),
+    ]
+    page_limit_warning: Optional[str] = None
+    
+    # The loop now starts from where it left off (or page 1)
     while page_num <= total_pages and page_num <= max_pages_to_fetch:
         logging.info(f"  -> Fetching page {page_num}/{total_pages} (limit: {max_pages_to_fetch})...")
         paged_params = base_params + [("page", str(page_num))]
@@ -151,36 +166,47 @@ def search_cases(
                     all_case_ids.add(case["caseId"])
 
             try:
-                # Determine total pages only on the first successful request
-                if page_num == 1:
-                    total_pages = int(response.get("PagesCount", 1))
-                    if total_pages > max_pages_to_fetch:
-                        page_limit_warning = f"собрано только {max_pages_to_fetch}/{total_pages} страниц"
-                        logging.warning(f"Page limit hit for {inn_pair_key}: Will fetch {max_pages_to_fetch} of {total_pages} pages.")
-
+                # Update total_pages if it has changed or is new
+                current_total_pages = int(response.get("PagesCount", 1))
+                if current_total_pages != total_pages:
+                    logging.info(f"Total pages for {inn_pair_key} is {current_total_pages}.")
+                    total_pages = current_total_pages
             except (ValueError, TypeError):
                 logging.warning(f"Could not parse 'PagesCount'. Pagination may be incomplete.")
-                break # Stop paginating if count is unreliable
+                break
         else:
-            # Stop if there's no result or an error occurred
             break
         page_num += 1
 
-    if not all_case_ids:
-         logging.info("API search returned no matching cases.")
-         search_cache[inn_pair_key] = [] # Cache the empty result
-         return [], False, None
+    # --- Process and Save Results ---
+    last_page_processed = page_num - 1
+    is_now_complete = last_page_processed >= total_pages
+    
+    if not all_case_ids and is_now_complete:
+        logging.info("API search returned no matching cases.")
+        # Cache the empty but complete result
+        search_cache[inn_pair_key] = {'case_ids': [], 'last_page_fetched': last_page_processed, 'total_pages': total_pages, 'is_complete': True}
+        return [], False, None
+
+    # Generate warning if we stopped due to the fetch limit but there were more pages
+    if not is_now_complete and total_pages > max_pages_to_fetch:
+        page_limit_warning = f"собрано только {max_pages_to_fetch}/{total_pages} страниц"
+        logging.warning(f"Page limit hit for {inn_pair_key}: Fetched up to page {max_pages_to_fetch} of {total_pages}.")
 
     sorted_case_ids = sorted(list(all_case_ids))
     logging.info(f"Finished search. Found {len(sorted_case_ids)} unique case(s).")
 
-    # Save to cache before returning, ONLY if the result is complete.
-    if not page_limit_warning:
-        search_cache[inn_pair_key] = sorted_case_ids
-    else:
-        logging.info(f"Partial result due to page limit. Search result for {inn_pair_key} will NOT be cached.")
+    # ALWAYS update the cache with the latest state (partial or complete)
+    search_cache[inn_pair_key] = {
+        'case_ids': sorted_case_ids,
+        'last_page_fetched': last_page_processed,
+        'total_pages': total_pages,
+        'is_complete': is_now_complete
+    }
+    logging.info(f"Search state for {inn_pair_key} saved to cache (Complete: {is_now_complete}).")
 
     return sorted_case_ids, False, page_limit_warning
+# --- END OF MODIFIED FUNCTION ---
 
 
 def get_case_info(token: str, case_id: str, case_info_cache: CacheDict) -> Tuple[Optional[JsonDict], bool]:
@@ -297,7 +323,7 @@ def main():
     script_dir = Path(__file__).parent
     
     # NEW: Maximum number of pages to fetch per search.
-    MAX_PAGES_TO_FETCH = 5
+    MAX_PAGES_TO_FETCH = 1
 
     # addname = "_081825_1"
     input_file = script_dir / "filtered_regions_descend_summa_no_groups.csv"
@@ -314,7 +340,7 @@ def main():
     case_info_cache_file = script_dir / "filtered_rdsng_1_cache_caseinfo.json"
     results_cache_file = script_dir / "filtered_rdsng_1_cache_results.json"
 
-    log_file_path = script_dir / "filtered_rdsng_1.log"
+    log_file_path = script_dir / "filtered_rdsng_1.1.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
