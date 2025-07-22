@@ -108,7 +108,6 @@ def make_api_request(params: ApiParams) -> Tuple[Optional[JsonDict], bool]:
         logging.error(f"API request failed with a network error: {e}")
         return None, True
 
-# --- MODIFIED FUNCTION ---
 def search_cases(
     token: str, debtor_inn: str, creditor_inn: str, search_cache: CacheDict, max_pages_to_fetch: int
 ) -> Tuple[Optional[List[str]], bool, Optional[str]]:
@@ -151,6 +150,9 @@ def search_cases(
     ]
     page_limit_warning: Optional[str] = None
     
+    # --- CHANGE 1: Add a flag to track if we broke because results ended ---
+    did_break_early = False
+    
     # The loop now starts from where it left off (or page 1)
     while page_num <= total_pages and page_num <= max_pages_to_fetch:
         logging.info(f"  -> Fetching page {page_num}/{total_pages} (limit: {max_pages_to_fetch})...")
@@ -160,6 +162,7 @@ def search_cases(
         if is_retryable:
             return None, True, None
 
+        # The API can return a valid response with an empty or null "Result"
         if response and response.get("Result"):
             for case in response.get("Result", []):
                 if "caseId" in case:
@@ -173,17 +176,24 @@ def search_cases(
                     total_pages = current_total_pages
             except (ValueError, TypeError):
                 logging.warning(f"Could not parse 'PagesCount'. Pagination may be incomplete.")
+                # --- CHANGE 2: Set the flag and break if pagination info is bad ---
+                did_break_early = True
                 break
         else:
+            # This means the API stopped returning results, so the search is complete.
+            # --- CHANGE 3: Set the flag before breaking the loop ---
+            did_break_early = True
             break
         page_num += 1
 
     # --- Process and Save Results ---
     last_page_processed = page_num - 1
-    is_now_complete = last_page_processed >= total_pages
+    
+    # --- CHANGE 4: A search is complete if we processed all pages OR if the API stopped returning results ---
+    is_now_complete = (last_page_processed >= total_pages) or did_break_early
     
     if not all_case_ids and is_now_complete:
-        logging.info("API search returned no matching cases.")
+        logging.info("API search returned no matching cases. Caching as complete.")
         # Cache the empty but complete result
         search_cache[inn_pair_key] = {'case_ids': [], 'last_page_fetched': last_page_processed, 'total_pages': total_pages, 'is_complete': True}
         return [], False, None
@@ -206,8 +216,6 @@ def search_cases(
     logging.info(f"Search state for {inn_pair_key} saved to cache (Complete: {is_now_complete}).")
 
     return sorted_case_ids, False, page_limit_warning
-# --- END OF MODIFIED FUNCTION ---
-
 
 def get_case_info(token: str, case_id: str, case_info_cache: CacheDict) -> Tuple[Optional[JsonDict], bool]:
     """
