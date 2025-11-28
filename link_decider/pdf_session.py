@@ -96,29 +96,6 @@ class PDFSession:
                 
                 # Fallback to CDP if direct download fails
                 logging.error("Direct download failed.")
-                # logging.info("Falling back to CDP method.")
-                # result = self.driver.execute_cdp_cmd("Page.printToPDF", {
-                #     "landscape": False,
-                #     "displayHeaderFooter": False,
-                #     "printBackground": True,
-                #     "preferCSSPageSize": True,
-                #     "transferMode": "ReturnAsBase64",
-                #     "waitForReadyState": "complete",
-                #     "timeout": 30000  # 30 seconds timeout
-                # })
-                
-                # if pdf_data := result.get("data"):
-                #     pdf_bytes = base64.b64decode(pdf_data)
-                #     reader = PdfReader(BytesIO(pdf_bytes))
-                #     texts = [page.extract_text() or "" for page in reader.pages]
-                #     final_text = "\n".join(texts).strip()
-                #     if final_text:
-                #         logging.info(f"CDP fallback successful: {url}")
-                #         return final_text
-                #     else:
-                #         logging.error("CDP fallback: PDF extracted empty text")
-                # else:
-                #     logging.error("CDP fallback: No PDF data received")
 
             except (WebDriverException, TimeoutException, requests.RequestException) as e:
                 logging.error(f"Attempt {attempt} failed: {str(e)}")
@@ -129,3 +106,19 @@ class PDFSession:
         
         logging.error(f"All attempts failed for: {url}")
         return None
+    
+
+def main():
+    # url = input("Enter PDF URL: ").strip()
+    url = "https://kad.arbitr.ru/Document/pdf/56bd946c-b2d1-4745-b472-9a144599cfe5/9f839f15-edf6-47f8-b6f1-3d84a2e28867/A66-8801-2023_20240415_Reshenie.pdf"
+    session = PDFSession(wait_sec=5, headless=False)
+    pdf_text = session.fetch_pdf_content(url)
+    session.close()
+    if pdf_text:
+        print("Extracted PDF text:\n")
+        print(pdf_text)
+    else:
+        print("Failed to extract PDF text.")
+
+if __name__ == "__main__":
+    main()
